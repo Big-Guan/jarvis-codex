@@ -1,9 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { createCyberStage, type VisualMode } from "./cyber-stage";
 import "./style.css";
 
-type Mode = "booting" | "ready" | "voice-starting" | "listening" | "working" | "speaking" | "degraded" | "stopped";
+type Mode = VisualMode;
 type Message = { id?: number | string; method?: string; params?: any };
 type Session = { threadId: string; cwd: string };
 type DirectVoice = {
@@ -31,7 +32,6 @@ const state = {
   session: null as Session | null,
   directVoice: null as DirectVoice | null,
   wake: null as WakeStatus | null,
-  level: 0,
   manualStop: false,
   agentWorking: false,
 };
@@ -80,12 +80,34 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
     <button id="settings" class="icon-button" aria-label="设置">⌘</button>
   </header>
   <section class="stage">
-    <div class="reticle outer"></div><div class="reticle inner"></div>
-    <div class="avatar-window">
-      <div class="helmet-crop"></div>
-      <div class="eye eye-left"></div><div class="eye eye-right"></div>
-      <div class="voice-ring ring-one"></div><div class="voice-ring ring-two"></div>
-      <canvas id="wave" width="900" height="120"></canvas>
+    <div class="depth-scene">
+      <div class="depth-layer depth-far" aria-hidden="true">
+        <div class="horizon-grid"></div>
+        <div class="ambient-orbit orbit-alpha"></div>
+        <div class="ambient-orbit orbit-beta"></div>
+        <canvas id="fx-canvas"></canvas>
+      </div>
+      <div class="depth-layer depth-mid" aria-hidden="true">
+        <div class="avatar-window">
+          <div class="helmet-slice helmet-back"></div>
+          <div class="helmet-slice helmet-main"></div>
+          <div class="helmet-slice helmet-front"></div>
+          <div class="eye eye-left"></div><div class="eye eye-right"></div>
+          <div class="energy-core"></div>
+        </div>
+      </div>
+      <div class="depth-layer depth-near" aria-hidden="true">
+        <div class="reticle outer"></div><div class="reticle inner"></div>
+        <div class="voice-ring ring-one"></div>
+        <div class="voice-ring ring-two"></div>
+        <div class="voice-ring ring-three"></div>
+        <div class="scan-cone"></div>
+        <div class="foreground-arc arc-left"></div>
+        <div class="foreground-arc arc-right"></div>
+        <div class="agent-beam"></div>
+        <canvas id="wave"></canvas>
+      </div>
+      <div class="depth-glass" aria-hidden="true"></div>
     </div>
     <div class="identity"><span>JARVIS CORE</span><b id="identity-state">SYSTEM BOOT</b></div>
   </section>
@@ -110,13 +132,21 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
 </main>`;
 
 const $ = <T extends Element>(selector: string) => document.querySelector<T>(selector)!;
-const shell = $(".shell");
+const shell = $<HTMLElement>(".shell");
 const transcript = $("#user-transcript");
 const response = $("#assistant-transcript");
 const banner = $("#degraded-banner") as HTMLDivElement;
 const mic = $("#mic") as HTMLButtonElement;
 const approval = $("#approval") as HTMLDialogElement;
 const settings = $("#settings-dialog") as HTMLDialogElement;
+const visualStage = createCyberStage({
+  root: shell,
+  scene: $<HTMLElement>(".depth-scene"),
+  waveCanvas: $("#wave") as HTMLCanvasElement,
+  fxCanvas: $("#fx-canvas") as HTMLCanvasElement,
+});
+visualStage.setMode(state.mode);
+window.addEventListener("beforeunload", () => visualStage.destroy(), { once: true });
 let approvalId: number | string | undefined;
 const copy: Record<Mode, [string, string]> = {
   booting: ["INITIALIZING", "SYSTEM BOOT"], ready: ["READY", "CODEX VOICE STANDBY"],
@@ -127,6 +157,7 @@ const copy: Record<Mode, [string, string]> = {
 
 function setMode(mode: Mode) {
   state.mode = mode; shell.setAttribute("data-mode", mode);
+  visualStage.setMode(mode);
   $("#mode-label").textContent = copy[mode][0]; $("#identity-state").textContent = copy[mode][1];
 }
 function setWorker(role: string, label: string, active = true) {
@@ -139,21 +170,6 @@ function roleOf(params: any) {
   return text.includes("research") ? "researcher" : text.includes("review") ? "reviewer" :
     text.includes("developer") || text.includes("commandexecution") || text.includes("filechange") ? "developer" : "orchestrator";
 }
-function drawWave() {
-  const canvas = $("#wave") as HTMLCanvasElement, context = canvas.getContext("2d")!;
-  context.clearRect(0, 0, canvas.width, canvas.height);
-  const time = performance.now() / 370, amplitude = 5 + state.level * 42 + (state.mode === "speaking" ? 22 : 0);
-  context.beginPath();
-  for (let x = 0; x <= canvas.width; x += 3) {
-    const y = canvas.height / 2 + (Math.sin(x * .085 + time * 2.2) + Math.sin(x * .031 - time) * .55) * amplitude * Math.sin(x / canvas.width * Math.PI) * .48;
-    x ? context.lineTo(x, y) : context.moveTo(x, y);
-  }
-  context.strokeStyle = state.mode === "working" ? "#ff9d2e" : state.mode === "stopped" ? "#ff3d33" : "#22c7ff";
-  context.shadowColor = context.strokeStyle; context.shadowBlur = 15; context.lineWidth = 2; context.stroke();
-  state.level *= .9; requestAnimationFrame(drawWave);
-}
-drawWave();
-
 function analyserLevel(analyser: AnalyserNode | null) {
   if (!analyser) return 0;
   const samples = new Uint8Array(analyser.fftSize);
@@ -169,7 +185,10 @@ function analyserLevel(analyser: AnalyserNode | null) {
 function updateAudioMeters() {
   const micLevel = analyserLevel(microphoneAnalyser);
   const speakerLevel = analyserLevel(remoteAnalyser);
-  state.level = Math.max(state.level, micLevel, speakerLevel);
+  visualStage.setAudioLevels({
+    mic: micLevel,
+    speaker: speakerLevel,
+  });
   if (state.directVoice?.voiceActive && !state.agentWorking) {
     if (speakerLevel > 0.08 && state.mode !== "speaking") setMode("speaking");
     if (speakerLevel < 0.025 && state.mode === "speaking") setMode("listening");

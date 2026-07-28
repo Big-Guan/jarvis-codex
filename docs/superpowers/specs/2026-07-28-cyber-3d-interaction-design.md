@@ -73,5 +73,15 @@ interface CyberStageController {
 - 连续语音输入、远端语音输出和任务执行期间没有明显掉帧。
 - 1440×900 与 960×620 均无溢出、遮挡或不可点击区域。
 - 隐藏窗口后动画停止，重新显示后正确恢复。
-- `npm run check` 全部通过。
+- Node tests、TypeScript/Vite build、Rust fmt 和 clippy 全部通过；若仓库位于 macOS FileProvider 管理目录，`wake:build` 的签名验证需在非同步目录单独完成。
 - 保留两档窗口尺寸的视觉截图用于贡献说明。
+
+### 视觉基线
+
+1440×900：
+
+![Jarvis 展示级赛博 2.5D 主界面](../../images/jarvis-main-ui.png)
+
+960×620：
+
+![Jarvis 最小窗口 2.5D 主界面](../../images/jarvis-main-ui-960.png)
