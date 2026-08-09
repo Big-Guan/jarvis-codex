@@ -3,12 +3,13 @@ use serde_json::{json, Value};
 use std::{
     collections::HashMap,
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Stdio,
     sync::{
-        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
+    time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::{
@@ -25,13 +26,34 @@ struct AppState {
     wake_enabled: AtomicBool,
     wake_ready: AtomicBool,
     wake_supervisor_running: AtomicBool,
-    wake_pid: AtomicU32,
+    wake_stop_file: RwLock<Option<PathBuf>>,
     wake_authorization: RwLock<String>,
 }
 
 #[tauri::command]
 fn startup_is_background(state: State<'_, AppState>) -> bool {
     state.background_start
+}
+
+#[tauri::command]
+fn autostart_status(app: AppHandle) -> Result<bool, String> {
+    use tauri_plugin_autostart::ManagerExt;
+
+    app.autolaunch()
+        .is_enabled()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn set_autostart(app: AppHandle, enabled: bool) -> Result<(), String> {
+    use tauri_plugin_autostart::ManagerExt;
+
+    if enabled {
+        app.autolaunch().enable()
+    } else {
+        app.autolaunch().disable()
+    }
+    .map_err(|error| error.to_string())
 }
 
 #[cfg(target_os = "macos")]
@@ -73,9 +95,54 @@ async fn request_microphone_permission() -> Result<String, String> {
     Ok(if granted { "authorized" } else { "denied" }.to_owned())
 }
 
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn request_camera_permission() -> Result<String, String> {
+    use block2::RcBlock;
+    use objc2::runtime::Bool;
+    use objc2_av_foundation::{AVAuthorizationStatus, AVCaptureDevice, AVMediaTypeVideo};
+    use std::sync::Mutex as StdMutex;
+
+    let media_type =
+        unsafe { AVMediaTypeVideo }.ok_or_else(|| "macOS 未提供摄像头授权类型".to_owned())?;
+    let status = unsafe { AVCaptureDevice::authorizationStatusForMediaType(media_type) };
+    match status {
+        AVAuthorizationStatus::Authorized => return Ok("authorized".to_owned()),
+        AVAuthorizationStatus::Denied => return Ok("denied".to_owned()),
+        AVAuthorizationStatus::Restricted => return Ok("restricted".to_owned()),
+        _ => {}
+    }
+
+    let (sender, receiver) = oneshot::channel::<bool>();
+    let sender = Arc::new(StdMutex::new(Some(sender)));
+    {
+        let completion_sender = sender.clone();
+        let completion = RcBlock::new(move |granted: Bool| {
+            if let Ok(mut guard) = completion_sender.lock() {
+                if let Some(sender) = guard.take() {
+                    let _ = sender.send(granted.as_bool());
+                }
+            }
+        });
+        unsafe {
+            AVCaptureDevice::requestAccessForMediaType_completionHandler(media_type, &completion);
+        }
+    }
+    let granted = receiver
+        .await
+        .map_err(|_| "macOS 摄像头授权回调中断".to_owned())?;
+    Ok(if granted { "authorized" } else { "denied" }.to_owned())
+}
+
 #[cfg(not(target_os = "macos"))]
 #[tauri::command]
 async fn request_microphone_permission() -> Result<String, String> {
+    Ok("authorized".to_owned())
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+async fn request_camera_permission() -> Result<String, String> {
     Ok("authorized".to_owned())
 }
 
@@ -441,7 +508,100 @@ async fn wake_status_value(state: &AppState) -> WakeStatus {
     }
 }
 
-fn start_wake_supervisor(app: AppHandle) {
+fn validated_wake_phrase(value: Option<String>) -> Result<Option<String>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let phrase = value.trim();
+    if phrase.is_empty() {
+        return Ok(None);
+    }
+    if phrase.chars().count() > 64 || phrase.chars().any(char::is_control) {
+        return Err("自定义唤醒词必须是 1–64 个可见字符".to_owned());
+    }
+    Ok(Some(phrase.to_owned()))
+}
+
+fn wake_channel_directory(app: &AppHandle) -> Result<PathBuf, String> {
+    let directory = app
+        .path()
+        .app_cache_dir()
+        .map_err(|error| format!("无法定位唤醒通道目录：{error}"))?
+        .join("wake");
+    fs::create_dir_all(&directory).map_err(|error| format!("无法创建唤醒通道目录：{error}"))?;
+    Ok(directory)
+}
+
+fn wake_channel_paths(app: &AppHandle) -> Result<(PathBuf, PathBuf), String> {
+    let directory = wake_channel_directory(app)?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let base = format!("{}-{nonce}", std::process::id());
+    Ok((
+        directory.join(format!("{base}.jsonl")),
+        directory.join(format!("{base}.stop")),
+    ))
+}
+
+async fn stop_previous_wake_helper(app: &AppHandle) -> Result<(), String> {
+    let directory = wake_channel_directory(app)?;
+    let owner_file = directory.join("active");
+    let Ok(value) = fs::read_to_string(&owner_file) else {
+        return Ok(());
+    };
+    let stop_file = PathBuf::from(value.trim());
+    let owned_path = stop_file.parent() == Some(directory.as_path())
+        && stop_file.extension().and_then(|value| value.to_str()) == Some("stop");
+    if owned_path {
+        let _ = fs::write(&stop_file, "stop");
+        // A helper that triggered a cold launch exits on its own after opening
+        // the host. Give both that path and the stop-file watcher time to finish.
+        tokio::time::sleep(Duration::from_millis(900)).await;
+    }
+    let _ = fs::remove_file(owner_file);
+    Ok(())
+}
+
+fn record_wake_helper_owner(app: &AppHandle, stop_file: &Path) -> Result<(), String> {
+    let owner_file = wake_channel_directory(app)?.join("active");
+    fs::write(owner_file, stop_file.to_string_lossy().as_bytes())
+        .map_err(|error| format!("无法记录唤醒监听器实例：{error}"))
+}
+
+fn clear_wake_helper_owner(app: &AppHandle, stop_file: &Path) {
+    let Ok(directory) = wake_channel_directory(app) else {
+        return;
+    };
+    let owner_file = directory.join("active");
+    let is_current = fs::read_to_string(&owner_file)
+        .map(|value| value.trim() == stop_file.to_string_lossy())
+        .unwrap_or(false);
+    if is_current {
+        let _ = fs::remove_file(owner_file);
+    }
+}
+
+async fn signal_wake_helper_stop(state: &AppState) {
+    if let Some(path) = state.wake_stop_file.read().await.clone() {
+        let _ = fs::write(path, "stop");
+    }
+}
+
+async fn stop_wake_supervisor(state: &AppState) {
+    state.wake_enabled.store(false, Ordering::SeqCst);
+    state.wake_ready.store(false, Ordering::SeqCst);
+    for _ in 0..40 {
+        signal_wake_helper_stop(state).await;
+        if !state.wake_supervisor_running.load(Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+fn start_wake_supervisor(app: AppHandle, wake_phrase: Option<String>) {
     let state = app.state::<AppState>();
     if state.wake_supervisor_running.swap(true, Ordering::SeqCst) {
         return;
@@ -460,25 +620,37 @@ fn start_wake_supervisor(app: AppHandle) {
                 return;
             }
         };
-        // A previous host may have exited while its LaunchServices helper
-        // remained alive. Keep exactly one microphone listener.
-        let _ = Command::new("/usr/bin/pkill")
-            .args(["-x", "JarvisWakeListener"])
-            .status()
-            .await;
-
+        if let Err(error) = stop_previous_wake_helper(&app).await {
+            *state.wake_authorization.write().await = error;
+            state.wake_enabled.store(false, Ordering::SeqCst);
+            state.wake_supervisor_running.store(false, Ordering::SeqCst);
+            let _ = app.emit("jarvis-wake-status", wake_status_value(&state).await);
+            return;
+        }
         let mut woke = false;
         while state.wake_enabled.load(Ordering::SeqCst) {
             state.wake_ready.store(false, Ordering::SeqCst);
-            let event_file =
-                std::env::temp_dir().join(format!("jarvis-wake-{}.jsonl", std::process::id()));
-            let _ = fs::remove_file(&event_file);
+            let (event_file, stop_file) = match wake_channel_paths(&app) {
+                Ok(paths) => paths,
+                Err(error) => {
+                    *state.wake_authorization.write().await = error;
+                    break;
+                }
+            };
             if let Err(error) = fs::write(&event_file, "") {
                 *state.wake_authorization.write().await = format!("无法创建唤醒事件通道：{error}");
                 break;
             }
+            *state.wake_stop_file.write().await = Some(stop_file.clone());
+            if let Err(error) = record_wake_helper_owner(&app, &stop_file) {
+                *state.wake_authorization.write().await = error;
+                let _ = fs::remove_file(&event_file);
+                break;
+            }
             if !state.wake_enabled.load(Ordering::SeqCst) {
                 let _ = fs::remove_file(&event_file);
+                let _ = fs::remove_file(&stop_file);
+                clear_wake_helper_owner(&app, &stop_file);
                 break;
             }
 
@@ -489,7 +661,12 @@ fn start_wake_supervisor(app: AppHandle) {
                 .args(["-n", "-W"])
                 .arg(&helper)
                 .args(["--args", "--event-file"])
-                .arg(&event_file);
+                .arg(&event_file)
+                .arg("--stop-file")
+                .arg(&stop_file);
+            if let Some(phrase) = wake_phrase.as_deref() {
+                command.arg("--wake-phrase").arg(phrase);
+            }
             if let Some(host_app) = host_app_bundle_path(&app) {
                 command.arg("--host-app").arg(host_app);
             }
@@ -504,12 +681,13 @@ fn start_wake_supervisor(app: AppHandle) {
                 Err(error) => {
                     *state.wake_authorization.write().await =
                         format!("无法启动唤醒监听器：{error}");
+                    let _ = fs::remove_file(&event_file);
+                    let _ = fs::remove_file(&stop_file);
+                    clear_wake_helper_owner(&app, &stop_file);
+                    *state.wake_stop_file.write().await = None;
                     break;
                 }
             };
-            state
-                .wake_pid
-                .store(child.id().unwrap_or(0), Ordering::SeqCst);
             let mut processed = 0usize;
 
             loop {
@@ -567,14 +745,16 @@ fn start_wake_supervisor(app: AppHandle) {
             }
 
             if woke || !state.wake_enabled.load(Ordering::SeqCst) {
-                let _ = Command::new("/usr/bin/pkill")
-                    .args(["-x", "JarvisWakeListener"])
-                    .status()
-                    .await;
+                let _ = fs::write(&stop_file, "stop");
             }
-            let _ = child.wait().await;
+            if timeout(Duration::from_secs(3), child.wait()).await.is_err() {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+            }
             let _ = fs::remove_file(&event_file);
-            state.wake_pid.store(0, Ordering::SeqCst);
+            let _ = fs::remove_file(&stop_file);
+            clear_wake_helper_owner(&app, &stop_file);
+            *state.wake_stop_file.write().await = None;
             if woke || !state.wake_enabled.load(Ordering::SeqCst) {
                 break;
             }
@@ -582,6 +762,7 @@ fn start_wake_supervisor(app: AppHandle) {
         }
 
         state.wake_ready.store(false, Ordering::SeqCst);
+        *state.wake_stop_file.write().await = None;
         state.wake_supervisor_running.store(false, Ordering::SeqCst);
         if woke {
             // The WebView owns the RTCPeerConnection, so wake only raises the
@@ -594,8 +775,12 @@ fn start_wake_supervisor(app: AppHandle) {
 }
 
 #[tauri::command]
-async fn arm_wake_listener(app: AppHandle) -> Result<WakeStatus, String> {
-    start_wake_supervisor(app.clone());
+async fn arm_wake_listener(
+    app: AppHandle,
+    wake_phrase: Option<String>,
+) -> Result<WakeStatus, String> {
+    let wake_phrase = validated_wake_phrase(wake_phrase)?;
+    start_wake_supervisor(app.clone(), wake_phrase);
     tokio::time::sleep(Duration::from_millis(80)).await;
     Ok(wake_status_value(&app.state::<AppState>()).await)
 }
@@ -603,28 +788,8 @@ async fn arm_wake_listener(app: AppHandle) -> Result<WakeStatus, String> {
 #[tauri::command]
 async fn disarm_wake_listener(app: AppHandle) -> Result<WakeStatus, String> {
     let state = app.state::<AppState>();
-    state.wake_enabled.store(false, Ordering::SeqCst);
-    state.wake_ready.store(false, Ordering::SeqCst);
-    let pid = state.wake_pid.swap(0, Ordering::SeqCst);
-    if pid > 0 {
-        let _ = Command::new("/bin/kill")
-            .arg(pid.to_string())
-            .status()
-            .await;
-    }
-    // The supervisor starts asynchronously and can cross this command in
-    // flight. Keep terminating until it has observed wake_enabled=false.
-    for _ in 0..15 {
-        let _ = Command::new("/usr/bin/pkill")
-            .args(["-x", "JarvisWakeListener"])
-            .status()
-            .await;
-        if !state.wake_supervisor_running.load(Ordering::SeqCst) {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    // AVAudioEngine releases the input device asynchronously after SIGTERM.
+    stop_wake_supervisor(&state).await;
+    // AVAudioEngine releases the input device asynchronously after stopping.
     // Starting WebRTC in the same tick can otherwise fail with NotAllowedError.
     tokio::time::sleep(Duration::from_millis(350)).await;
     Ok(wake_status_value(&state).await)
@@ -642,25 +807,8 @@ async fn consume_cold_wake(app: AppHandle, state: State<'_, AppState>) -> Result
     }
     // Replay a cold launch through the same external event path as a normal
     // warm wake, but only after the newly spawned listener fully releases mic.
-    state.wake_enabled.store(false, Ordering::SeqCst);
-    state.wake_ready.store(false, Ordering::SeqCst);
-    let pid = state.wake_pid.swap(0, Ordering::SeqCst);
-    if pid > 0 {
-        let _ = Command::new("/bin/kill")
-            .arg(pid.to_string())
-            .status()
-            .await;
-    }
-    for _ in 0..15 {
-        let _ = Command::new("/usr/bin/pkill")
-            .args(["-x", "JarvisWakeListener"])
-            .status()
-            .await;
-        if !state.wake_supervisor_running.load(Ordering::SeqCst) {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    stop_wake_supervisor(&state).await;
+    stop_previous_wake_helper(&app).await?;
     tokio::time::sleep(Duration::from_millis(350)).await;
     raise_jarvis_window(&app);
     let _ = app.emit("jarvis-wake", json!({"ok": true, "cold": true}));
@@ -679,10 +827,14 @@ fn default_workspace() -> Result<String, String> {
         }
     }
     if let Ok(home) = std::env::var("HOME") {
-        let path = PathBuf::from(home);
-        if path.is_dir() {
-            return Ok(path.to_string_lossy().into_owned());
+        let workspace_dir = PathBuf::from(&home).join("JarvisWorkspace");
+        if !workspace_dir.is_dir() {
+            std::fs::create_dir_all(&workspace_dir).ok();
         }
+        if workspace_dir.is_dir() {
+            return Ok(workspace_dir.to_string_lossy().into_owned());
+        }
+        return Ok(home);
     }
     std::env::current_dir()
         .map(|value| value.to_string_lossy().into_owned())
@@ -956,6 +1108,7 @@ pub fn run() {
     let cold_wake_pending = arguments.iter().any(|argument| argument == "--jarvis-wake");
     let background_start = arguments.iter().any(|argument| argument == "--background");
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
             runtime: Mutex::new(None),
             cold_wake_pending: AtomicBool::new(cold_wake_pending),
@@ -963,7 +1116,7 @@ pub fn run() {
             wake_enabled: AtomicBool::new(false),
             wake_ready: AtomicBool::new(false),
             wake_supervisor_running: AtomicBool::new(false),
-            wake_pid: AtomicU32::new(0),
+            wake_stop_file: RwLock::new(None),
             wake_authorization: RwLock::new("notDetermined".to_owned()),
         })
         .invoke_handler(tauri::generate_handler![
@@ -974,7 +1127,10 @@ pub fn run() {
             consume_cold_wake,
             default_workspace,
             startup_is_background,
+            autostart_status,
+            set_autostart,
             request_microphone_permission,
+            request_camera_permission,
             start_jarvis,
             start_codex_voice,
             stop_codex_voice,
@@ -985,24 +1141,60 @@ pub fn run() {
             shutdown
         ])
         .setup(move |app| {
-            use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
+            use tauri_plugin_autostart::MacosLauncher;
             app.handle().plugin(tauri_plugin_autostart::init(
                 MacosLauncher::LaunchAgent,
                 Some(vec!["--background"]),
             ))?;
-            let _ = app.autolaunch().enable();
             if let Some(window) = app.get_webview_window("main") {
+                #[cfg(target_os = "macos")]
+                {
+                    use objc2::msg_send;
+                    use objc2::runtime::{AnyObject, Bool};
+                    use tauri::webview::PlatformWebview;
+                    let _ = window.with_webview(|wv: PlatformWebview| {
+                        let raw = wv.inner() as *mut AnyObject;
+                        if raw.is_null() {
+                            return;
+                        }
+                        unsafe {
+                            let config: *mut AnyObject = msg_send![raw, configuration];
+                            if !config.is_null() {
+                                let _: () = msg_send![config, _setMediaCaptureEnabled: Bool::YES];
+                            }
+                        }
+                    });
+                }
                 if background_start {
                     let _ = window.hide();
                 } else {
                     raise_jarvis_window(app.handle());
                 }
             }
-            if background_start {
-                start_wake_supervisor(app.handle().clone());
-            }
             Ok(())
         })
         .run(tauri::generate_context!())
         .expect("error while running Jarvis Codex");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validated_wake_phrase;
+
+    #[test]
+    fn wake_phrase_validation_normalizes_empty_values() {
+        assert_eq!(validated_wake_phrase(None).unwrap(), None);
+        assert_eq!(validated_wake_phrase(Some("   ".to_owned())).unwrap(), None);
+        assert_eq!(
+            validated_wake_phrase(Some("  Hello Jarvis  ".to_owned())).unwrap(),
+            Some("Hello Jarvis".to_owned())
+        );
+    }
+
+    #[test]
+    fn wake_phrase_validation_rejects_unsafe_values() {
+        assert!(validated_wake_phrase(Some("a\nb".to_owned())).is_err());
+        assert!(validated_wake_phrase(Some("x".repeat(65))).is_err());
+        assert!(validated_wake_phrase(Some("x".repeat(64))).is_ok());
+    }
 }

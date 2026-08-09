@@ -14,10 +14,10 @@
     "windows": [
       {
         "title": "JARVIS · CODEX",
-        "width": 1440,
-        "height": 900,
-        "minWidth": 960,
-        "minHeight": 620,
+        "width": 860,
+        "height": 600,
+        "minWidth": 680,
+        "minHeight": 520,
         "center": true,
         "decorations": false,
         "transparent": true,
@@ -26,7 +26,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost data:; style-src 'self' 'unsafe-inline'; media-src 'self' blob:; font-src 'self'"
+      "csp": "default-src 'self' blob:; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; connect-src 'self' blob: ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost data:; style-src 'self' 'unsafe-inline'; media-src 'self' blob: mediastream:; font-src 'self'"
     }
   },
   "bundle": {

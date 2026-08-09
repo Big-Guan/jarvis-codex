@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { open as openNativeDialog } from "@tauri-apps/plugin-dialog";
+import { CameraGestureController, type GestureEvent } from "./gesture-camera";
 import "./style.css";
 
 type Mode = "booting" | "ready" | "voice-starting" | "listening" | "working" | "speaking" | "degraded" | "stopped";
@@ -25,6 +27,22 @@ type WakeEvent = {
   cold?: boolean;
 };
 type PermissionMode = "safe" | "auto" | "full";
+type StudioTheme = "quantum" | "reactor" | "synthwave" | "matrix" | "arctic";
+type StudioLayout = "balanced" | "focus" | "command";
+type StudioPreviewState = "ready" | "listening" | "working" | "approval" | "complete" | "error";
+type StudioConfig = {
+  version: 1;
+  callsign: string;
+  subtitle: string;
+  theme: StudioTheme;
+  layout: StudioLayout;
+  intensity: number;
+  avatarScale: number;
+  showWorkers: boolean;
+  showDialogue: boolean;
+  showWave: boolean;
+  compactControls: boolean;
+};
 
 const state = {
   mode: "booting" as Mode,
@@ -39,6 +57,361 @@ const state = {
 const WORKSPACE_KEY = "jarvis.workspace";
 const THREAD_KEY_PREFIX = "jarvis.threadId:";
 const PERMISSION_KEY = "jarvis.permissionMode";
+const STUDIO_KEY = "jarvis.studio.v1";
+const VOICE_KEY = "jarvis.voice";
+const LANG_KEY = "jarvis.lang";
+const WAKE_PHRASE_KEY = "jarvis.wakePhrase";
+const DEFAULT_WAKE_PHRASE = "嗨 Jarvis / Hey Jarvis";
+
+type VoiceId = "alloy" | "arbor" | "ash" | "ballad" | "breeze" | "cedar" | "coral" | "cove" | "echo" | "ember"
+  | "juniper" | "maple" | "marin" | "sage" | "shimmer" | "sol" | "spruce" | "vale" | "verse";
+
+const SUPPORTED_VOICES: readonly VoiceId[] = [
+  "alloy", "arbor", "ash", "ballad", "breeze", "cedar", "coral", "cove", "echo", "ember",
+  "juniper", "maple", "marin", "sage", "shimmer", "sol", "spruce", "vale", "verse",
+] as const;
+
+function validVoiceId(value: unknown): VoiceId {
+  return typeof value === "string" && (SUPPORTED_VOICES as readonly string[]).includes(value as string)
+    ? (value as VoiceId)
+    : "cove";
+}
+
+function storedVoice(): VoiceId {
+  return validVoiceId(localStorage.getItem(VOICE_KEY));
+}
+
+type Lang = "zh" | "en";
+
+const T = {
+  subtitle: { zh: "语音操作系统", en: "CODEX VOICE SYSTEM" },
+  modeBooting: { zh: "初始化中", en: "INITIALIZING" },
+  modeReady: { zh: "待命", en: "STANDBY" },
+  modeVoiceStarting: { zh: "连接中", en: "CONNECTING" },
+  modeListening: { zh: "聆听中", en: "LISTENING" },
+  modeWorking: { zh: "执行中", en: "WORKING" },
+  modeSpeaking: { zh: "说话中", en: "SPEAKING" },
+  modeDegraded: { zh: "受限", en: "DEGRADED" },
+  modeStopped: { zh: "已停止", en: "STOPPED" },
+  settings: { zh: "设置", en: "Settings" },
+  studio: { zh: "工作台", en: "Studio" },
+  identityBooting: { zh: "系统启动中", en: "SYSTEM BOOT" },
+  identityReady: { zh: "待命", en: "STANDBY" },
+  identityListening: { zh: "聆听中", en: "LISTENING" },
+  identityWorking: { zh: "执行中", en: "WORKING" },
+  identitySpeaking: { zh: "说话中", en: "SPEAKING" },
+  identityStopped: { zh: "已停止", en: "STOPPED" },
+  workerConnecting: { zh: "连接中", en: "Connecting" },
+  workerStandby: { zh: "待命", en: "Standby" },
+  workerFresh: { zh: "新线程就绪", en: "Fresh thread ready" },
+  dialogueYou: { zh: "你", en: "YOU" },
+  dialogueJarvis: { zh: "贾维斯", en: "JARVIS" },
+  codexVoice: { zh: "语音对话", en: "CODEX VOICE" },
+  codexVoiceDesc: { zh: "V3 WebRTC 直连", en: "V3 WEBRTC · DIRECT" },
+  cmdPlaceholder: { zh: "Voice 不可用时，发送文字指令…", en: "Type a command when Voice is unavailable…" },
+  execute: { zh: "执行", en: "EXECUTE" },
+  stop: { zh: "停止", en: "STOP" },
+  stopDesc: { zh: "中断所有任务", en: "INTERRUPT ALL" },
+  degradedTitle: { zh: "需要权限", en: "JARVIS NEEDS PERMISSION" },
+  degradedCopy: { zh: "首次使用请允许麦克风和语音识别。", en: "Please allow microphone and speech recognition." },
+  approvalTitle: { zh: "高风险操作确认", en: "High-Risk Operation" },
+  approvalCopy: { zh: "Codex 请求执行需要确认的动作。", en: "Codex requested an action that needs approval." },
+  deny: { zh: "拒绝", en: "Deny" },
+  approve: { zh: "允许一次", en: "Approve Once" },
+  transcriptWake: { zh: "嗨，贾维斯", en: "Hey, Jarvis" },
+  transcriptConnecting: { zh: "正在连接 Codex 线程…", en: "Connecting to Codex thread…" },
+  transcriptNew: { zh: "新开线程", en: "New Thread" },
+  transcriptNewMsg: { zh: "新的 Codex thread 已创建。下一次唤醒和文字任务都会进入这个线程。", en: "A new Codex thread has been created. The next wake and text tasks will use it." },
+  workspaceSaved: { zh: "工作目录已保存，重启 Jarvis 后生效。", en: "Workspace saved. Restart Jarvis to apply." },
+  voiceSaved: { zh: (l: string) => `音色已切换为 ${l}，下一次唤醒生效。`, en: (l: string) => `Voice changed to ${l}, takes effect on next wake.` },
+  permChanged: { zh: (l: string) => `权限已切换为"${l}"，下一次任务将续接当前 Codex thread。`, en: (l: string) => `Permission changed to "${l}". Next task resumes current thread.` },
+  newThreadError: { zh: (m: string) => `新建线程失败，原线程仍可续接：${m}`, en: (m: string) => `Failed to create new thread: ${m}` },
+  voiceDefault: { zh: "Codex 默认音色", en: "Codex default voice" },
+  settingsVoiceSection: { zh: "语音音色", en: "Voice" },
+  settingsVoiceHint: { zh: "下次唤醒生效", en: "Takes effect on next wake" },
+  settingsWorkspaceSection: { zh: "工作目录", en: "Workspace" },
+  settingsWorkspaceHint: { zh: "修改后需重启 Jarvis", en: "Restart Jarvis after changing" },
+  settingsPermissionSection: { zh: "操作权限", en: "Permission" },
+  settingsPermissionHint: { zh: "切换将重建 Codex 运行时", en: "Rebuilds Codex runtime" },
+  settingsRuntimeSection: { zh: "运行状态", en: "Runtime status" },
+  settingsSafe: { zh: "安全模式", en: "Safe" },
+  settingsSafeDesc: { zh: "越界或高风险时询问确认", en: "Ask before risky operations" },
+  settingsAuto: { zh: "自动办公", en: "Auto" },
+  settingsAutoDesc: { zh: "目录内自主执行，越界自动阻止", en: "Autonomous within workspace" },
+  settingsFull: { zh: "完全访问", en: "Full Access" },
+  settingsFullDesc: { zh: "不限制目录不询问，谨慎使用", en: "No limits, use carefully" },
+  settingsRecommended: { zh: "推荐", en: "Recommended" },
+  settingsCaution: { zh: "谨慎", en: "Caution" },
+  settingsInfo: { zh: "每个工作目录续接自己的 Codex thread，新开线程后原线程仍保留在 Codex 历史记录中。唤醒词在本机识别；Jarvis 通过 Codex app-server V3 WebRTC 进入官方 Voice 线程，复用本机 Codex 登录，不模拟点击、不建立第二套 GPT-Live 会话。", en: "Each workspace resumes its own Codex thread. New threads keep old ones in history. Wake phrase is recognized on-device. Jarvis enters Voice via Codex app-server V3 WebRTC, reusing local auth." },
+  save: { zh: "保存", en: "Save" },
+  close: { zh: "关闭", en: "Close" },
+  newThread: { zh: "新建线程", en: "New Thread" },
+  studioDialog: { zh: "DIY 工作台", en: "DIY STUDIO" },
+  langLabel: { zh: "界面语言", en: "Language" },
+  langZh: { zh: "简体中文", en: "简体中文" },
+  langEn: { zh: "English", en: "English" },
+  langHint: { zh: "语言偏好", en: "Language preference" },
+  wakePhraseLabel: { zh: "唤醒词", en: "Wake phrase" },
+  gestureLabel: { zh: "手势控制", en: "Gestures" },
+  gestureToggleLabel: { zh: "启用摄像头手势识别", en: "Enable camera gesture control" },
+  gestureToggleHint: { zh: "首次开启时 macOS 会弹出系统授权对话框，请点「允许」", en: "macOS will ask for camera permission on first enable — click Allow" },
+  gestureHelp: { zh: "查看手势", en: "View gestures" },
+  gestureGuideTitle: { zh: "手势控制说明", en: "Gesture controls" },
+  gestureGuideIntro: { zh: "将单手完整放入摄像头画面，保持约 0.3 秒即可触发。", en: "Keep one full hand in view for about 0.3 seconds to trigger an action." },
+  gestureStopName: { zh: "停止", en: "Stop" },
+  gestureStopDesc: { zh: "张开手掌或拇指向下", en: "Open palm or thumbs down" },
+  gestureConfirmName: { zh: "确认", en: "Confirm" },
+  gestureConfirmDesc: { zh: "握紧拳头", en: "Closed fist" },
+  gestureApproveName: { zh: "批准", en: "Approve" },
+  gestureApproveDesc: { zh: "拇指向上", en: "Thumbs up" },
+  gestureCockpitName: { zh: "打开驾驶舱", en: "Open cockpit" },
+  gestureCockpitDesc: { zh: "伸出食指和中指，比出 V 字", en: "Victory / V sign" },
+  gestureSpinName: { zh: "360° 旋转", en: "360° spin" },
+  gestureSpinDesc: { zh: "伸出拇指、食指和小指", en: "I-love-you hand sign" },
+  gestureVoiceName: { zh: "语音对话", en: "Voice conversation" },
+  gestureVoiceDesc: { zh: "食指向上", en: "Point one finger up" },
+  gestureReleaseTip: { zh: "每次触发后请先松手，再做下一个手势。", en: "Release your hand after each action before making the next gesture." },
+  autostartLabel: { zh: "后台启动", en: "Background startup" },
+  autostartToggleLabel: { zh: "登录 macOS 时后台启动 Jarvis", en: "Start Jarvis in the background at login" },
+  autostartToggleHint: { zh: "可随时关闭；关闭后仍可手动启动 Jarvis", en: "You can disable this at any time and still launch Jarvis manually" },
+  pickFolder: { zh: "选择目录", en: "Browse" },
+  pickFolderError: { zh: "目录选择失败", en: "Failed to pick folder" },
+  wakePhrasePlaceholder: { zh: "输入自定义唤醒短语", en: "Custom wake phrase" },
+  autonomyLabel: { zh: "自治度", en: "Autonomy" },
+  autonomyLow: { zh: "低", en: "Low" },
+  autonomyMid: { zh: "中", en: "Mid" },
+  autonomyHigh: { zh: "高", en: "High" },
+  unsavedTitle: { zh: "设置已修改，尚未保存", en: "Unsaved changes" },
+  unsavedSave: { zh: "保存并关闭", en: "Save & close" },
+  unsavedDiscard: { zh: "放弃更改", en: "Discard" },
+  unsavedKeep: { zh: "继续编辑", en: "Keep editing" },
+  fullAccessConfirm: { zh: "完全访问将允许 Codex 访问工作目录外的文件且不再请求确认。确定启用吗？", en: "Full Access lets Codex access files outside the workspace without asking for approval. Enable it?" },
+  wakePhraseHint: { zh: "自定义唤醒短语", en: "Custom wake phrase" },
+  wakePhrase: { zh: "嗨 Jarvis / Hey Jarvis", en: "Hey Jarvis" },
+  wakeListenerLabel: { zh: "唤醒监听", en: "Wake listener" },
+  threadLabel: { zh: "Codex 线程", en: "Codex thread" },
+  workspaceLabel: { zh: "工作目录", en: "Workspace" },
+  voiceKernelLabel: { zh: "语音内核", en: "Voice kernel" },
+  permissionLabel: { zh: "当前权限", en: "Permission" },
+  checking: { zh: "检测中", en: "Checking" },
+  notStarted: { zh: "未启动", en: "Not started" },
+};
+
+function storedLang(): Lang {
+  const v = localStorage.getItem(LANG_KEY);
+  return v === "en" ? "en" : "zh";
+}
+let currentLang = storedLang();
+
+function $t(key: keyof typeof T, ...args: string[]): string {
+  const entry = T[key];
+  if (!entry) return key;
+  const val = entry[currentLang];
+  return typeof val === "function" ? (val as (...a: string[]) => string)(...args) : val;
+}
+
+function applyLanguage(lang: Lang | null = null, persist = true) {
+  const next = lang ?? currentLang;
+  if (persist) localStorage.setItem(LANG_KEY, next);
+  currentLang = next;
+  const s = document.querySelector(".shell");
+  if (s) s.setAttribute("data-lang", next);
+
+  const m = state.mode;
+  const modeLabels: Record<Mode, keyof typeof T> = {
+    booting: "modeBooting", ready: "modeReady", "voice-starting": "modeVoiceStarting",
+    listening: "modeListening", working: "modeWorking", speaking: "modeSpeaking",
+    degraded: "modeDegraded", stopped: "modeStopped",
+  };
+  $("#brand-subtitle").textContent = $t("subtitle");
+  $<HTMLElement>("#mode-label").textContent = $t(modeLabels[m] ?? "modeBooting");
+  ($("#settings") as HTMLButtonElement).ariaLabel = $t("settings");
+  ($("#studio") as HTMLButtonElement).ariaLabel = $t("studio");
+
+  const identityStates: Partial<Record<Mode, keyof typeof T>> = {
+    booting: "identityBooting", ready: "identityReady", listening: "identityListening",
+    working: "identityWorking", speaking: "identitySpeaking", stopped: "identityStopped",
+  };
+  $<HTMLElement>("#identity-state").textContent = $t(identityStates[m] ?? "identityBooting");
+
+  ($("#command-input") as HTMLInputElement).placeholder = $t("cmdPlaceholder");
+  ($("#command-form button") as HTMLButtonElement).textContent = $t("execute");
+  const micB = document.querySelector<HTMLElement>(".mic b");
+  if (micB) micB.textContent = $t("codexVoice");
+  const micS = document.querySelector<HTMLElement>(".mic small");
+  if (micS) micS.textContent = $t("codexVoiceDesc");
+  const stopB = document.querySelector<HTMLElement>(".stop b");
+  if (stopB) stopB.textContent = $t("stop");
+  const stopS = document.querySelector<HTMLElement>(".stop small");
+  if (stopS) stopS.textContent = $t("stopDesc");
+
+  ($("#degraded-banner b") as HTMLElement).textContent = $t("degradedTitle");
+
+  ($("#approval h2") as HTMLElement).textContent = $t("approvalTitle");
+  ($("#approve") as HTMLElement).textContent = $t("approve");
+  ($("#deny") as HTMLElement).textContent = $t("deny");
+
+  const youB = document.querySelector<HTMLElement>(".dialogue b:first-of-type");
+  if (youB) youB.textContent = $t("dialogueYou");
+  const jarvisB = document.querySelector<HTMLElement>(".dialogue .jarvis");
+  if (jarvisB) jarvisB.textContent = $t("dialogueJarvis");
+
+  // Refresh settings dialog if it's open
+  if (settings.open) {
+    $<HTMLElement>("#settings-dialog .settings-header h2").textContent = $t("settings");
+    const cards = document.querySelectorAll<HTMLElement>("#settings-dialog .settings-card .section-heading");
+    const cardTitles: (keyof typeof T)[] = [
+      "wakePhraseLabel", "gestureLabel", "autostartLabel", "langLabel", "settingsVoiceSection",
+      "settingsWorkspaceSection", "settingsPermissionSection", "settingsRuntimeSection",
+    ];
+    for (let i = 0; i < cards.length && i < cardTitles.length; i++) {
+      const b = cards[i].querySelector("b");
+      if (b) b.textContent = $t(cardTitles[i]);
+    }
+    const permLabels = document.querySelectorAll<HTMLElement>("#settings-dialog .permission-options label span b");
+    const permDescs = document.querySelectorAll<HTMLElement>("#settings-dialog .permission-options label span small");
+    const permTags = document.querySelectorAll<HTMLElement>("#settings-dialog .permission-options em");
+    if (permLabels[0]) permLabels[0].textContent = $t("settingsSafe");
+    if (permLabels[1]) permLabels[1].textContent = $t("settingsAuto");
+    if (permLabels[2]) permLabels[2].textContent = $t("settingsFull");
+    if (permDescs[0]) permDescs[0].textContent = $t("settingsSafeDesc");
+    if (permDescs[1]) permDescs[1].textContent = $t("settingsAutoDesc");
+    if (permDescs[2]) permDescs[2].textContent = $t("settingsFullDesc");
+    if (permTags[0]) permTags[0].textContent = $t("settingsRecommended");
+    if (permTags[1]) permTags[1].textContent = $t("settingsCaution");
+    ($("#settings-dialog .info-block") as HTMLElement).textContent = $t("settingsInfo");
+    ($("#save-settings") as HTMLElement).textContent = $t("save");
+    ($("#close-settings") as HTMLElement).textContent = $t("close");
+    ($("#new-thread") as HTMLElement).textContent = $t("newThread");
+    ($("#open-studio") as HTMLElement).textContent = $t("studioDialog");
+    ($("#gesture-toggle-label") as HTMLElement).textContent = $t("gestureToggleLabel");
+    ($("#gesture-toggle-hint") as HTMLElement).textContent = $t("gestureToggleHint");
+    ($("#gesture-help") as HTMLElement).textContent = $t("gestureHelp");
+    ($("#gesture-guide-title") as HTMLElement).textContent = $t("gestureGuideTitle");
+    ($("#gesture-guide-intro") as HTMLElement).textContent = $t("gestureGuideIntro");
+    ($("#gesture-stop-name") as HTMLElement).textContent = $t("gestureStopName");
+    ($("#gesture-stop-desc") as HTMLElement).textContent = $t("gestureStopDesc");
+    ($("#gesture-confirm-name") as HTMLElement).textContent = $t("gestureConfirmName");
+    ($("#gesture-confirm-desc") as HTMLElement).textContent = $t("gestureConfirmDesc");
+    ($("#gesture-approve-name") as HTMLElement).textContent = $t("gestureApproveName");
+    ($("#gesture-approve-desc") as HTMLElement).textContent = $t("gestureApproveDesc");
+    ($("#gesture-cockpit-name") as HTMLElement).textContent = $t("gestureCockpitName");
+    ($("#gesture-cockpit-desc") as HTMLElement).textContent = $t("gestureCockpitDesc");
+    ($("#gesture-spin-name") as HTMLElement).textContent = $t("gestureSpinName");
+    ($("#gesture-spin-desc") as HTMLElement).textContent = $t("gestureSpinDesc");
+    ($("#gesture-voice-name") as HTMLElement).textContent = $t("gestureVoiceName");
+    ($("#gesture-voice-desc") as HTMLElement).textContent = $t("gestureVoiceDesc");
+    ($("#gesture-release-tip") as HTMLElement).textContent = $t("gestureReleaseTip");
+    ($("#close-gesture-guide") as HTMLButtonElement).ariaLabel = $t("close");
+    ($("#autostart-toggle-label") as HTMLElement).textContent = $t("autostartToggleLabel");
+    ($("#autostart-toggle-hint") as HTMLElement).textContent = $t("autostartToggleHint");
+    ($("#pick-workspace") as HTMLElement).textContent = $t("pickFolder");
+    ($("#autonomy-label") as HTMLElement).textContent = $t("autonomyLabel");
+    ($("#autonomy-tick-low") as HTMLElement).textContent = $t("autonomyLow");
+    ($("#autonomy-tick-mid") as HTMLElement).textContent = $t("autonomyMid");
+    ($("#autonomy-tick-high") as HTMLElement).textContent = $t("autonomyHigh");
+    ($("#autonomy-output") as HTMLOutputElement).textContent = autonomyText(permissionMode);
+    ($("#runtime-wake-label") as HTMLElement).textContent = $t("wakeListenerLabel");
+    ($("#runtime-thread-label") as HTMLElement).textContent = $t("threadLabel");
+    ($("#runtime-workspace-label") as HTMLElement).textContent = $t("workspaceLabel");
+    ($("#runtime-permission-label") as HTMLElement).textContent = $t("permissionLabel");
+    ($("#runtime-voice-label") as HTMLElement).textContent = $t("voiceKernelLabel");
+    ($("#wake-phrase-input") as HTMLInputElement).placeholder = $t("wakePhrasePlaceholder");
+    ($("#settings-unsaved-text") as HTMLElement).textContent = $t("unsavedTitle");
+    ($("#unsaved-save") as HTMLElement).textContent = $t("unsavedSave");
+    ($("#unsaved-discard") as HTMLElement).textContent = $t("unsavedDiscard");
+    ($("#unsaved-keep") as HTMLElement).textContent = $t("unsavedKeep");
+    syncVoiceSelectText();
+  }
+}
+
+function $voiceLabel(voice: VoiceId) {
+  const labels: Record<VoiceId, { zh: string; en: string }> = {
+    alloy: { zh: "Alloy · 中性", en: "Alloy · Neutral" },
+    arbor: { zh: "Arbor · 温和", en: "Arbor · Warm" },
+    ash: { zh: "Ash · 沉稳", en: "Ash · Calm" },
+    ballad: { zh: "Ballad · 歌谣", en: "Ballad" },
+    breeze: { zh: "Breeze · 轻快", en: "Breeze · Light" },
+    cedar: { zh: "Cedar · 木纹", en: "Cedar" },
+    coral: { zh: "Coral · 珊瑚", en: "Coral" },
+    cove: { zh: "Cove · 湾区", en: "Cove" },
+    echo: { zh: "Echo · 回声", en: "Echo" },
+    ember: { zh: "Ember · 余烬", en: "Ember" },
+    juniper: { zh: "Juniper · 杜松", en: "Juniper" },
+    maple: { zh: "Maple · 枫木", en: "Maple" },
+    marin: { zh: "Marin · 海滨", en: "Marin" },
+    sage: { zh: "Sage · 智者", en: "Sage" },
+    shimmer: { zh: "Shimmer · 微光", en: "Shimmer" },
+    sol: { zh: "Sol · 阳光", en: "Sol" },
+    spruce: { zh: "Spruce · 云杉", en: "Spruce" },
+    vale: { zh: "Vale · 河谷", en: "Vale" },
+    verse: { zh: "Verse · 诗篇", en: "Verse" },
+  };
+  return labels[voice]?.[currentLang] ?? voice;
+}
+
+function syncVoiceSelectText() {
+  const select = $("#voice-select") as HTMLSelectElement;
+  const defaultOpt = select.querySelector("option[value='']") as HTMLOptionElement;
+  if (defaultOpt) defaultOpt.textContent = $t("voiceDefault");
+  for (const opt of select.querySelectorAll<HTMLOptionElement>("option:not([value=''])")) {
+    const voice = opt.value as VoiceId;
+    if (SUPPORTED_VOICES.includes(voice)) opt.textContent = $voiceLabel(voice);
+  }
+}
+const STUDIO_DEFAULTS: StudioConfig = {
+  version: 1,
+  callsign: "JARVIS",
+  subtitle: "CODEX VOICE SYSTEM",
+  theme: "quantum",
+  layout: "balanced",
+  intensity: 72,
+  avatarScale: 100,
+  showWorkers: true,
+  showDialogue: true,
+  showWave: true,
+  compactControls: false,
+};
+const STUDIO_THEMES: Record<StudioTheme, { accent: string; rgb: string; label: string }> = {
+  quantum: { accent: "#20c7ff", rgb: "32,199,255", label: "QUANTUM BLUE" },
+  reactor: { accent: "#ffb02e", rgb: "255,176,46", label: "ARC REACTOR" },
+  synthwave: { accent: "#e657ff", rgb: "230,87,255", label: "SYNTHWAVE" },
+  matrix: { accent: "#53f59a", rgb: "83,245,154", label: "MATRIX GRID" },
+  arctic: { accent: "#d9f7ff", rgb: "217,247,255", label: "ARCTIC CORE" },
+};
+
+function normalizeStudioConfig(value: unknown): StudioConfig {
+  const input = value && typeof value === "object" ? value as Partial<StudioConfig> : {};
+  const theme = input.theme && input.theme in STUDIO_THEMES ? input.theme : STUDIO_DEFAULTS.theme;
+  const layout = input.layout === "focus" || input.layout === "command"
+    ? input.layout
+    : STUDIO_DEFAULTS.layout;
+  return {
+    version: 1,
+    callsign: typeof input.callsign === "string" && input.callsign.trim()
+      ? input.callsign.trim().slice(0, 18)
+      : STUDIO_DEFAULTS.callsign,
+    subtitle: typeof input.subtitle === "string" && input.subtitle.trim()
+      ? input.subtitle.trim().slice(0, 36)
+      : STUDIO_DEFAULTS.subtitle,
+    theme,
+    layout,
+    intensity: Math.min(100, Math.max(20, Number(input.intensity) || STUDIO_DEFAULTS.intensity)),
+    avatarScale: Math.min(125, Math.max(75, Number(input.avatarScale) || STUDIO_DEFAULTS.avatarScale)),
+    showWorkers: input.showWorkers ?? STUDIO_DEFAULTS.showWorkers,
+    showDialogue: input.showDialogue ?? STUDIO_DEFAULTS.showDialogue,
+    showWave: input.showWave ?? STUDIO_DEFAULTS.showWave,
+    compactControls: input.compactControls ?? STUDIO_DEFAULTS.compactControls,
+  };
+}
+
+function storedStudioConfig(): StudioConfig {
+  try {
+    return normalizeStudioConfig(JSON.parse(localStorage.getItem(STUDIO_KEY) ?? "null"));
+  } catch {
+    return { ...STUDIO_DEFAULTS };
+  }
+}
 const permissionLabels: Record<PermissionMode, string> = {
   safe: "安全模式 · 需要时确认",
   auto: "自动办公 · 当前目录自主执行",
@@ -50,6 +423,12 @@ function storedPermissionMode(): PermissionMode {
 }
 let workspace = "";
 let permissionMode = storedPermissionMode();
+let studioConfig = storedStudioConfig();
+let studioPreviewState: StudioPreviewState = "ready";
+let selectedVoice = storedVoice();
+let settingsDirty = false;
+let settingsLanguageSnapshot = currentLang;
+let autostartEnabled = false;
 const savedThreadId = () => localStorage.getItem(`${THREAD_KEY_PREFIX}${workspace}`);
 let peer: RTCPeerConnection | null = null;
 let microphoneStream: MediaStream | null = null;
@@ -79,7 +458,12 @@ if (!currentWindow) {
 if (currentWindow) {
   void currentWindow.onCloseRequested(async (event) => {
     event.preventDefault();
-    await currentWindow.hide();
+    try {
+      await prepareForBackground();
+      await currentWindow.hide();
+    } catch (error) {
+      reportAsyncError("转入后台失败", error);
+    }
   });
 }
 
@@ -87,8 +471,10 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
 <main class="shell" data-mode="booting">
   <canvas id="particle-field" width="1440" height="900" aria-hidden="true"></canvas>
   <header class="topbar hud-panel">
-    <div class="brand"><i></i><strong>JARVIS</strong><span></span><em>CODEX VOICE SYSTEM</em></div>
-    <div class="status"><i></i><b id="mode-label">INITIALIZING</b></div>
+    <div class="brand"><i></i><strong id="brand-callsign">JARVIS</strong><span></span><em id="brand-subtitle">语音操作系统</em></div>
+    <div class="status"><i></i><b id="mode-label">初始化中</b></div>
+    <button id="studio" class="icon-button studio-button" aria-label="工作台">◇</button>
+    <button id="camera-gesture" class="icon-button camera-button" aria-label="手势控制"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg></button>
     <button id="settings" class="icon-button" aria-label="设置">⌘</button>
   </header>
   <section class="stage">
@@ -99,30 +485,254 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
         <div class="armor-shards" aria-hidden="true"></div>
         <img id="jarvis-character" class="helmet-character" src="/assets/jarvis-character-v2.png" alt="Jarvis holographic helmet">
         <div class="helmet-scan"></div>
+        <div class="mouth-visor" aria-hidden="true"></div>
         <div class="assembly-flash" aria-hidden="true"></div>
       </div>
       <canvas id="wave" width="900" height="120"></canvas>
     </div>
-    <div class="identity"><span>JARVIS CORE</span><b id="identity-state">SYSTEM BOOT</b></div>
+    <div class="identity"><span id="identity-callsign">JARVIS CORE</span><b id="identity-state">系统启动中</b></div>
   </section>
-  <aside class="workers">
-    <article class="worker active" data-role="orchestrator"><span>›_</span><div><b>Codex</b><small>Connecting</small></div><i></i></article>
-    <article class="worker" data-role="developer"><span>⌬</span><div><b>Developer</b><small>Standby</small></div><i></i></article>
-    <article class="worker" data-role="researcher"><span>⌕</span><div><b>Researcher</b><small>Standby</small></div><i></i></article>
-    <article class="worker" data-role="reviewer"><span>✓</span><div><b>Reviewer</b><small>Standby</small></div><i></i></article>
-  </aside>
   <section class="dialogue hud-panel">
-    <b>YOU</b><p id="user-transcript">“嗨，Jarvis”</p>
-    <b class="jarvis">JARVIS</b><p id="assistant-transcript">正在连接 Codex 原生任务线程…</p>
+    <b>你</b><p id="user-transcript">"嗨，贾维斯"</p>
+    <b class="jarvis">贾维斯</b><p id="assistant-transcript">正在连接 Codex 线程…</p>
   </section>
   <footer class="controls">
-    <button id="mic" class="control mic"><span aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="8.25" y="3" width="7.5" height="11.5" rx="3.75"></rect><path d="M5.5 11.25v.75a6.5 6.5 0 0 0 13 0v-.75M12 18.5V22M8.75 22h6.5"></path></svg></span><b>CODEX VOICE</b><small>V3 WEBRTC · DIRECT</small></button>
-    <form id="command-form" class="command"><input id="command-input" aria-label="文字指令" placeholder="Voice 不可用时，发送本地 Codex 文字任务…" autocomplete="off"><button>EXECUTE</button></form>
-    <button id="stop" class="control stop"><span aria-hidden="true"><svg viewBox="0 0 24 24"><rect class="stop-mark" x="6.5" y="6.5" width="11" height="11" rx="1.8"></rect></svg></span><b>STOP</b><small>INTERRUPT ALL</small></button>
+    <button id="steer" class="control steer-ctl"><span aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5.5 5.5l2 2M16.5 16.5l2 2M5.5 18.5l2-2M16.5 7.5l2-2"/></svg></span><b>转向</b><small>执行中插话</small></button>
+    <button id="mic" class="control mic"><span aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="8.25" y="3" width="7.5" height="11.5" rx="3.75"></rect><path d="M5.5 11.25v.75a6.5 6.5 0 0 0 13 0v-.75M12 18.5V22M8.75 22h6.5"></path></svg></span><b>语音对话</b><small>V3 WebRTC 直连</small></button>
+    <form id="command-form" class="command"><input id="command-input" aria-label="文字指令" placeholder="Voice 不可用时，发送文字指令…" autocomplete="off"><button>执行</button></form>
+    <button id="stop" class="control stop"><span aria-hidden="true"><svg viewBox="0 0 24 24"><rect class="stop-mark" x="6.5" y="6.5" width="11" height="11" rx="1.8"></rect></svg></span><b>停止</b><small>中断所有任务</small></button>
   </footer>
-  <div id="degraded-banner" class="degraded-banner" hidden><b>JARVIS NEEDS PERMISSION</b><span id="degraded-copy">首次使用请允许麦克风和语音识别。</span></div>
+  <div id="degraded-banner" class="degraded-banner" hidden><b>需要权限</b><span id="degraded-copy">首次使用请允许麦克风和语音识别。</span></div>
+
+  <div id="gesture-hud" class="gesture-hud hidden">
+    <span class="gesture-drag-handle" aria-hidden="true" title="拖动调整摄像头窗口位置">⠿</span>
+    <div class="gesture-video-frame">
+      <video id="gesture-video" autoplay playsinline muted></video>
+      <div class="gesture-video-scan"></div>
+      <span class="gesture-corner tl"></span><span class="gesture-corner tr"></span><span class="gesture-corner bl"></span><span class="gesture-corner br"></span>
+    </div>
+  </div>
+
+  <div id="dashboard" class="dashboard hidden">
+    <div class="dashboard-panel hud-panel">
+      <div class="dashboard-header"><i></i><b>仪表盘</b><button id="close-dashboard" class="dashboard-close">×</button></div>
+      <div class="dashboard-stream" id="dashboard-stream">
+        <div class="dash-entry dash-ready">◈ 系统就绪</div>
+      </div>
+      <div class="dashboard-footer"><span id="dashboard-stats">等待事件…</span></div>
+    </div>
+  </div>
+
+  <div id="cockpit" class="cockpit hidden" aria-hidden="true">
+    <div class="cockpit-panel">
+      <div class="cockpit-header"><i></i><b>对话驾驶舱</b><i></i></div>
+      <div class="cockpit-body">
+        <div class="cockpit-transcript"><b>你</b><p id="cockpit-user">—</p><b class="jarvis">贾维斯</b><p id="cockpit-assistant">—</p></div>
+        <div class="cockpit-controls">
+          <button class="cockpit-btn cockpit-steer" title="转向">转向</button>
+          <button class="cockpit-btn cockpit-stop" title="停止">停止</button>
+        </div>
+      </div>
+      <div class="cockpit-footer"><span>按 Esc 关闭</span></div>
+    </div>
+  </div>
   <dialog id="approval"><h2>高风险操作确认</h2><p id="approval-copy">Codex 请求执行需要确认的动作。</p><div><button id="deny">拒绝</button><button id="approve">允许一次</button></div></dialog>
-  <dialog id="settings-dialog"><h2>JARVIS SYSTEM</h2><dl><dt>Wake phrase</dt><dd>嗨 Jarvis / Hey Jarvis</dd><dt>Wake listener</dt><dd id="wake-auth">检测中</dd><dt>Codex thread</dt><dd id="thread-id">—</dd><dt>Workspace</dt><dd id="workspace">—</dd><dt>Permission</dt><dd id="permission-mode-label">—</dd><dt>Voice kernel</dt><dd id="voice-auth">检测中</dd></dl><label class="workspace-setting">工作目录<input id="workspace-setting" autocomplete="off" spellcheck="false"></label><fieldset class="permission-setting"><legend>Codex 操作权限</legend><label><input type="radio" name="permission-mode" value="safe"><span><b>安全模式</b><small>超出当前目录或高风险操作时询问</small></span></label><label class="recommended"><input type="radio" name="permission-mode" value="auto"><span><b>自动办公</b><small>当前目录内自主执行，越界操作直接阻止</small></span><em>推荐</em></label><label class="danger"><input type="radio" name="permission-mode" value="full"><span><b>完全访问</b><small>不限制目录且不询问，请谨慎使用</small></span></label></fieldset><p>权限切换会停止当前任务并重建 Codex 运行时，但会继续使用当前工作目录保存的 thread。</p><p>修改工作目录后，下次重启 Jarvis 生效。每个工作目录会续接自己的 Codex thread。</p><p>“新开线程”会结束当前任务并创建一个全新的 Codex thread；原线程仍保留在 Codex 历史记录中。</p><p>唤醒词在本机识别；Jarvis 页面通过 Codex app-server V3 WebRTC 进入官方 Voice 线程。认证复用本机 Codex 登录，不读取凭据、不模拟点击，也不建立第二套 GPT-Live。</p><div class="settings-actions"><button id="new-thread" class="new-thread">＋ 新开线程</button><span></span><button id="save-settings">保存</button><button id="close-settings">关闭</button></div></dialog>
+  <dialog id="settings-dialog">
+    <div class="settings-header">
+      <h2 class="drag-handle">系统设置</h2>
+      <button id="close-settings-top" class="settings-close-btn" aria-label="关闭">×</button>
+    </div>
+
+    <section class="settings-card">
+      <div class="section-heading"><span>01</span><div><b>唤醒词</b></div></div>
+      <input id="wake-phrase-input" aria-label="唤醒短语" autocomplete="off" spellcheck="false" placeholder="输入自定义唤醒短语">
+    </section>
+
+    <section class="settings-card">
+      <div class="section-heading"><span>02</span><div><b>手势控制</b></div></div>
+      <div class="gesture-toggle-row">
+        <div class="gesture-toggle-line">
+          <label class="gesture-toggle">
+            <input id="gesture-toggle" type="checkbox">
+            <span class="gesture-toggle-switch"><i></i></span>
+            <span class="gesture-toggle-label" id="gesture-toggle-label">启用摄像头手势识别</span>
+          </label>
+          <button id="gesture-help" class="gesture-help-btn" type="button">查看手势</button>
+        </div>
+        <p class="settings-hint" id="gesture-toggle-hint">首次开启时 macOS 会弹出系统授权对话框，请点「允许」</p>
+      </div>
+    </section>
+
+    <section class="settings-card">
+      <div class="section-heading"><span>03</span><div><b>后台启动</b></div></div>
+      <div class="gesture-toggle-row">
+        <label class="gesture-toggle">
+          <input id="autostart-toggle" type="checkbox">
+          <span class="gesture-toggle-switch"><i></i></span>
+          <span class="gesture-toggle-label" id="autostart-toggle-label">登录 macOS 时后台启动 Jarvis</span>
+        </label>
+        <p class="settings-hint" id="autostart-toggle-hint">可随时关闭；关闭后仍可手动启动 Jarvis</p>
+      </div>
+    </section>
+
+    <section class="settings-card">
+      <div class="section-heading"><span>04</span><div><b>界面语言</b></div></div>
+      <select id="lang-select" aria-label="选择界面语言">
+        <option value="zh">简体中文</option>
+        <option value="en">English</option>
+      </select>
+    </section>
+
+    <section class="settings-card">
+      <div class="section-heading"><span>05</span><div><b>语音音色</b></div></div>
+      <select id="voice-select" aria-label="选择语音音色"><option value="">Codex 默认音色</option></select>
+    </section>
+
+    <section class="settings-card">
+      <div class="section-heading"><span>06</span><div><b>工作目录</b></div></div>
+      <div class="workspace-picker">
+        <span id="workspace-path" class="workspace-path">加载中…</span>
+        <button id="pick-workspace" class="pick-folder">选择目录</button>
+      </div>
+    </section>
+
+    <section class="settings-card">
+      <div class="section-heading"><span>07</span><div><b>操作权限</b></div></div>
+      <label class="autonomy-slider">
+        <span><i id="autonomy-label">自治度</i> <output id="autonomy-output">中</output></span>
+        <input id="autonomy-range" type="range" min="0" max="100" step="33" value="50">
+        <div class="autonomy-ticks"><span id="autonomy-tick-low">低</span><span id="autonomy-tick-mid">中</span><span id="autonomy-tick-high">高</span></div>
+      </label>
+      <div class="permission-options">
+        <label><input type="radio" name="permission-mode" value="safe"><span><b>安全模式</b><small>越界或高风险时询问确认</small></span></label>
+        <label class="recommended"><input type="radio" name="permission-mode" value="auto"><span><b>自动办公</b><small>目录内自主执行，越界自动阻止</small></span><em>推荐</em></label>
+        <label class="danger"><input type="radio" name="permission-mode" value="full"><span><b>完全访问</b><small>不限制目录不询问，谨慎使用</small></span><em>谨慎</em></label>
+      </div>
+    </section>
+
+    <section class="settings-card runtime-status-card" aria-live="polite">
+      <div class="section-heading"><span>08</span><div><b>运行状态</b></div></div>
+      <dl class="runtime-status">
+        <div><dt id="runtime-wake-label">唤醒监听</dt><dd id="wake-auth">检测中</dd></div>
+        <div><dt id="runtime-thread-label">Codex 线程</dt><dd id="thread-id">—</dd></div>
+        <div><dt id="runtime-workspace-label">工作目录</dt><dd id="workspace">—</dd></div>
+        <div><dt id="runtime-permission-label">当前权限</dt><dd id="permission-mode-label">—</dd></div>
+        <div><dt id="runtime-voice-label">语音内核</dt><dd id="voice-auth">检测中</dd></div>
+      </dl>
+    </section>
+
+    <p class="info-block">每个工作目录续接自己的 Codex thread，新开线程后原线程仍保留在 Codex 历史记录中。唤醒词在本机识别；Jarvis 通过 Codex app-server V3 WebRTC 进入官方 Voice 线程，复用本机 Codex 登录，不模拟点击、不建立第二套 GPT-Live 会话。</p>
+
+    <div id="settings-unsaved" class="settings-unsaved" hidden>
+      <span id="settings-unsaved-text">设置已修改，尚未保存</span>
+      <div class="settings-unsaved-actions">
+        <button id="unsaved-save" class="primary-action">保存并关闭</button>
+        <button id="unsaved-discard">放弃更改</button>
+        <button id="unsaved-keep">继续编辑</button>
+      </div>
+    </div>
+
+    <div class="settings-actions">
+      <button id="new-thread" class="new-thread">＋ 新建线程</button>
+      <span class="spacer"></span>
+      <button id="open-studio" class="studio-entry">◇ DIY 工作台</button>
+      <button id="save-settings" class="primary-action">保存</button>
+      <button id="close-settings">关闭</button>
+    </div>
+  </dialog>
+  <dialog id="gesture-guide-dialog" class="gesture-guide-dialog" aria-labelledby="gesture-guide-title">
+    <header class="gesture-guide-header">
+      <div><span>CAMERA GESTURES</span><h2 id="gesture-guide-title">手势控制说明</h2></div>
+      <button id="close-gesture-guide" class="settings-close-btn" aria-label="关闭">×</button>
+    </header>
+    <p id="gesture-guide-intro" class="gesture-guide-intro">将单手完整放入摄像头画面，保持约 0.3 秒即可触发。</p>
+    <div class="gesture-guide-grid">
+      <article class="gesture-guide-card"><span class="gesture-guide-icon">✋<i>👎</i></span><div><b id="gesture-stop-name">停止</b><small id="gesture-stop-desc">张开手掌或拇指向下</small></div></article>
+      <article class="gesture-guide-card"><span class="gesture-guide-icon">✊</span><div><b id="gesture-confirm-name">确认</b><small id="gesture-confirm-desc">握紧拳头</small></div></article>
+      <article class="gesture-guide-card"><span class="gesture-guide-icon">👍</span><div><b id="gesture-approve-name">批准</b><small id="gesture-approve-desc">拇指向上</small></div></article>
+      <article class="gesture-guide-card"><span class="gesture-guide-icon">✌️</span><div><b id="gesture-cockpit-name">打开驾驶舱</b><small id="gesture-cockpit-desc">伸出食指和中指，比出 V 字</small></div></article>
+      <article class="gesture-guide-card"><span class="gesture-guide-icon">🤟</span><div><b id="gesture-spin-name">360° 旋转</b><small id="gesture-spin-desc">伸出拇指、食指和小指</small></div></article>
+      <article class="gesture-guide-card"><span class="gesture-guide-icon">☝️</span><div><b id="gesture-voice-name">语音对话</b><small id="gesture-voice-desc">食指向上</small></div></article>
+    </div>
+    <p id="gesture-release-tip" class="gesture-release-tip">每次触发后请先松手，再做下一个手势。</p>
+  </dialog>
+  <dialog id="studio-dialog" class="studio-dialog">
+    <header class="studio-header">
+      <div><span>视觉核心 · 自定义</span><h2>DIY 工作台</h2><p>装配你的视觉核心、身份标识与 HUD 模块。</p></div>
+      <button id="close-studio" class="studio-close" aria-label="关闭">×</button>
+    </header>
+    <div class="studio-grid">
+      <section class="studio-preview-bar">
+        <div class="preview-bar-left">
+          <div class="preview-mini-reactor"><i></i><i></i><b></b></div>
+          <div class="preview-bar-info">
+            <strong id="studio-preview-name">JARVIS</strong>
+            <small id="studio-preview-theme">QUANTUM BLUE</small>
+          </div>
+        </div>
+        <div class="preview-state-switcher">
+          <button data-studio-preview-state="ready" title="待机">待机</button>
+          <button data-studio-preview-state="listening" title="监听">监听</button>
+          <button data-studio-preview-state="working" title="执行">执行</button>
+          <button data-studio-preview-state="approval" title="确认">确认</button>
+          <button data-studio-preview-state="complete" title="完成">完成</button>
+          <button data-studio-preview-state="error" title="异常">异常</button>
+        </div>
+        <div class="preview-bar-status"><i></i><span id="studio-preview-status">READY // 实时预览</span></div>
+      </section>
+
+      <div class="studio-columns">
+        <section class="studio-section identity-editor">
+          <div class="section-heading"><span>01</span><div><b>系统身份</b><small>定义代号与副标题</small></div></div>
+          <label>系统代号<input id="studio-callsign" maxlength="18" autocomplete="off" placeholder="JARVIS"></label>
+          <label>核心副标题<input id="studio-subtitle" maxlength="36" autocomplete="off" placeholder="语音操作系统"></label>
+        </section>
+        <section class="studio-section layout-editor">
+          <div class="section-heading"><span>02</span><div><b>HUD 布局</b><small>选择界面方案</small></div></div>
+          <div class="layout-grid">
+            <button data-studio-layout="balanced"><i>◫</i><span><b>完整协作</b><small>全部界面</small></span></button>
+            <button data-studio-layout="focus"><i>◎</i><span><b>聚焦模式</b><small>角色优先</small></span></button>
+            <button data-studio-layout="command"><i>⌘</i><span><b>指挥模式</b><small>任务优先</small></span></button>
+          </div>
+        </section>
+      </div>
+
+      <section class="studio-section theme-editor">
+        <div class="section-heading"><span>03</span><div><b>能源光谱</b><small>切换主题配色</small></div></div>
+        <div class="theme-grid">
+          <button class="theme-chip" data-studio-theme="quantum"><i></i><b>量子蓝</b><small>默认</small></button>
+          <button class="theme-chip" data-studio-theme="reactor"><i></i><b>反应堆</b><small>金色</small></button>
+          <button class="theme-chip" data-studio-theme="synthwave"><i></i><b>合成波</b><small>紫色</small></button>
+          <button class="theme-chip" data-studio-theme="matrix"><i></i><b>矩阵</b><small>绿色</small></button>
+          <button class="theme-chip" data-studio-theme="arctic"><i></i><b>极地</b><small>白色</small></button>
+        </div>
+      </section>
+
+      <div class="studio-columns">
+        <section class="studio-section tuning-editor">
+          <div class="section-heading"><span>04</span><div><b>视觉调校</b><small>强度与比例</small></div></div>
+          <label class="range-control"><span>能量强度 <output id="studio-intensity-output">72%</output></span><input id="studio-intensity" type="range" min="20" max="100" step="1"></label>
+          <label class="range-control"><span>核心比例 <output id="studio-scale-output">100%</output></span><input id="studio-scale" type="range" min="75" max="125" step="1"></label>
+        </section>
+        <section class="studio-section module-editor">
+          <div class="section-heading"><span>05</span><div><b>HUD 模块</b><small>装卸界面组件</small></div></div>
+          <div class="module-grid">
+            <label><input id="studio-workers" type="checkbox"><span><b>协作面板</b><small>角色状态</small></span><i></i></label>
+            <label><input id="studio-dialogue" type="checkbox"><span><b>对话字幕</b><small>实时转写</small></span><i></i></label>
+            <label><input id="studio-wave" type="checkbox"><span><b>声波反馈</b><small>音频可视化</small></span><i></i></label>
+            <label><input id="studio-compact" type="checkbox"><span><b>极简控制</b><small>紧凑模式</small></span><i></i></label>
+          </div>
+        </section>
+      </div>
+    </div>
+    <footer class="studio-actions">
+      <span>所有调整实时预览并保存在本机</span>
+      <button id="reset-studio" class="ghost">恢复默认</button>
+      <button id="export-studio" class="ghost">导出配置</button>
+      <label class="import-studio">导入配置<input id="import-studio" type="file" accept="application/json,.json"></label>
+      <button id="apply-studio">装配完成</button>
+    </footer>
+  </dialog>
 </main>`;
 
 const $ = <T extends Element>(selector: string) => document.querySelector<T>(selector)!;
@@ -133,11 +743,116 @@ const banner = $("#degraded-banner") as HTMLDivElement;
 const mic = $("#mic") as HTMLButtonElement;
 const approval = $("#approval") as HTMLDialogElement;
 const settings = $("#settings-dialog") as HTMLDialogElement;
+const gestureGuide = $("#gesture-guide-dialog") as HTMLDialogElement;
+const studio = $("#studio-dialog") as HTMLDialogElement;
 const characterRig = $<HTMLElement>(".character-rig");
 const hoverControls = $<HTMLElement>(".controls");
 const settingsButton = $<HTMLButtonElement>("#settings");
 let controlsHideTimer: number | undefined;
 let characterActionTimer: number | undefined;
+
+function reportAsyncError(context: string, error: unknown) {
+  triggerCharacterAction("error");
+  response.textContent = `${context}：${String(error)}`;
+}
+
+function runAsync(context: string, task: Promise<unknown>) {
+  void task.catch((error) => reportAsyncError(context, error));
+}
+
+function applyStudioConfig(config: StudioConfig, persist = true) {
+  studioConfig = normalizeStudioConfig(config);
+  const theme = STUDIO_THEMES[studioConfig.theme];
+  shell.dataset.theme = studioConfig.theme;
+  shell.dataset.studioLayout = studioConfig.layout;
+  shell.style.setProperty("--theme-accent", theme.accent);
+  shell.style.setProperty("--theme-rgb", theme.rgb);
+  shell.style.setProperty("--fx-intensity", String(studioConfig.intensity / 100));
+  shell.style.setProperty("--avatar-scale", String(studioConfig.avatarScale / 100));
+  shell.classList.toggle("hide-workers", !studioConfig.showWorkers);
+  shell.classList.toggle("hide-dialogue", !studioConfig.showDialogue);
+  shell.classList.toggle("hide-wave", !studioConfig.showWave);
+  shell.classList.toggle("compact-controls", studioConfig.compactControls);
+  $("#brand-callsign").textContent = studioConfig.callsign.toUpperCase();
+  $("#brand-subtitle").textContent = studioConfig.subtitle.toUpperCase();
+  $("#identity-callsign").textContent = `${studioConfig.callsign.toUpperCase()} CORE`;
+  $("#studio-preview-name").textContent = studioConfig.callsign.toUpperCase();
+  $("#studio-preview-theme").textContent = theme.label;
+  if (persist) localStorage.setItem(STUDIO_KEY, JSON.stringify(studioConfig));
+}
+
+function syncStudioControls() {
+  ($("#studio-callsign") as HTMLInputElement).value = studioConfig.callsign;
+  ($("#studio-subtitle") as HTMLInputElement).value = studioConfig.subtitle;
+  ($("#studio-intensity") as HTMLInputElement).value = String(studioConfig.intensity);
+  ($("#studio-scale") as HTMLInputElement).value = String(studioConfig.avatarScale);
+  ($("#studio-workers") as HTMLInputElement).checked = studioConfig.showWorkers;
+  ($("#studio-dialogue") as HTMLInputElement).checked = studioConfig.showDialogue;
+  ($("#studio-wave") as HTMLInputElement).checked = studioConfig.showWave;
+  ($("#studio-compact") as HTMLInputElement).checked = studioConfig.compactControls;
+  $("#studio-intensity-output").textContent = `${studioConfig.intensity}%`;
+  $("#studio-scale-output").textContent = `${studioConfig.avatarScale}%`;
+  for (const button of document.querySelectorAll<HTMLButtonElement>("[data-studio-theme]")) {
+    button.classList.toggle("active", button.dataset.studioTheme === studioConfig.theme);
+  }
+  for (const button of document.querySelectorAll<HTMLButtonElement>("[data-studio-layout]")) {
+    button.classList.toggle("active", button.dataset.studioLayout === studioConfig.layout);
+  }
+}
+
+function studioConfigFromControls(): StudioConfig {
+  return normalizeStudioConfig({
+    ...studioConfig,
+    callsign: ($("#studio-callsign") as HTMLInputElement).value,
+    subtitle: ($("#studio-subtitle") as HTMLInputElement).value,
+    intensity: Number(($("#studio-intensity") as HTMLInputElement).value),
+    avatarScale: Number(($("#studio-scale") as HTMLInputElement).value),
+    showWorkers: ($("#studio-workers") as HTMLInputElement).checked,
+    showDialogue: ($("#studio-dialogue") as HTMLInputElement).checked,
+    showWave: ($("#studio-wave") as HTMLInputElement).checked,
+    compactControls: ($("#studio-compact") as HTMLInputElement).checked,
+  });
+}
+
+function applyStudioLayout(layout: StudioLayout) {
+  const presets: Record<StudioLayout, Pick<StudioConfig, "showWorkers" | "showDialogue" | "showWave" | "compactControls">> = {
+    balanced: { showWorkers: true, showDialogue: true, showWave: true, compactControls: false },
+    focus: { showWorkers: false, showDialogue: true, showWave: true, compactControls: true },
+    command: { showWorkers: true, showDialogue: false, showWave: false, compactControls: false },
+  };
+  applyStudioConfig({ ...studioConfig, ...presets[layout], layout });
+  syncStudioControls();
+}
+
+function setStudioPreviewState(previewState: StudioPreviewState) {
+  studioPreviewState = previewState;
+  const preview = $<HTMLElement>(".studio-preview-bar");
+  preview.dataset.previewState = previewState;
+  const labels: Record<StudioPreviewState, string> = {
+    ready: "就绪 · 实时预览",
+    listening: "聆听 · 语音在线",
+    working: "执行 · 任务进行中",
+    approval: "确认 · 等待授权",
+    complete: "完成 · 任务结束",
+    error: "异常 · 核心中断",
+  };
+  $("#studio-preview-status").textContent = labels[previewState];
+  for (const button of document.querySelectorAll<HTMLButtonElement>("[data-studio-preview-state]")) {
+    button.classList.toggle("active", button.dataset.studioPreviewState === previewState);
+  }
+}
+
+function openStudio() {
+  if (settings.open) {
+    requestCloseSettings();
+    if (settings.open) return;
+  }
+  syncStudioControls();
+  setStudioPreviewState(studioPreviewState);
+  studio.showModal();
+}
+
+applyStudioConfig(studioConfig, false);
 
 function revealControls() {
   if (controlsHideTimer !== undefined) window.clearTimeout(controlsHideTimer);
@@ -170,12 +885,47 @@ shell.addEventListener("focusin", (event) => {
 });
 shell.addEventListener("focusout", scheduleControlsHide);
 
-let approvalId: number | string | undefined;
+type ApprovalRequest = { id: number | string; method: string };
+const approvalQueue: ApprovalRequest[] = [];
+let activeApproval: ApprovalRequest | null = null;
+
+function showNextApproval() {
+  if (activeApproval || approval.open) return;
+  activeApproval = approvalQueue.shift() ?? null;
+  if (!activeApproval) return;
+  $("#approval-copy").textContent = `Codex 请求：${activeApproval.method}`;
+  approval.showModal();
+}
+
+function enqueueApproval(request: ApprovalRequest) {
+  approvalQueue.push(request);
+  triggerCharacterAction("approval", 1800);
+  showNextApproval();
+}
+
+async function resolveActiveApproval(approved: boolean) {
+  const request = activeApproval;
+  if (!request) return;
+  const buttons = [$("#approve") as HTMLButtonElement, $("#deny") as HTMLButtonElement];
+  for (const button of buttons) button.disabled = true;
+  try {
+    await invoke("resolve_server_request", { requestId: request.id, approved });
+    activeApproval = null;
+    approval.close();
+    queueMicrotask(showNextApproval);
+  } catch (error) {
+    response.textContent = `处理 Codex 授权请求失败：${String(error)}`;
+  } finally {
+    for (const button of buttons) button.disabled = false;
+  }
+}
+
+approval.addEventListener("cancel", (event) => event.preventDefault());
 const copy: Record<Mode, [string, string]> = {
-  booting: ["INITIALIZING", "SYSTEM BOOT"], ready: ["READY", "CODEX VOICE STANDBY"],
-  "voice-starting": ["VOICE LINKING", "OPENING CODEX VOICE"], listening: ["LISTENING", "OFFICIAL VOICE ONLINE"],
-  working: ["CODEX WORKING", "TASK EXECUTION"], speaking: ["JARVIS SPEAKING", "VOICE OUTPUT"],
-  degraded: ["PERMISSION NEEDED", "WAKE SYSTEM OFFLINE"], stopped: ["INTERRUPTED", "ALL SYSTEMS HALTED"],
+  booting: ["初始化中", "系统启动中"], ready: ["待命", "Codex Voice 就绪"],
+  "voice-starting": ["连接中", "正在打开 Codex Voice"], listening: ["聆听中", "官方 Voice 已上线"],
+  working: ["执行中", "任务处理中"], speaking: ["说话中", "语音输出中"],
+  degraded: ["需要权限", "唤醒系统离线"], stopped: ["已中断", "所有系统已停止"],
 };
 
 function setMode(mode: Mode) {
@@ -187,18 +937,125 @@ function setMode(mode: Mode) {
     shell.classList.add("is-forming");
     startParticleFormation();
   }
+  if (mode === "speaking") {
+    characterRig.classList.remove("spin-active");
+    void characterRig.clientWidth;
+  }
 }
+const cockpit = $<HTMLElement>("#cockpit");
+let cockpitOpen = false;
+
+function toggleCockpit(force?: boolean) {
+  cockpitOpen = force ?? !cockpitOpen;
+  cockpit.classList.toggle("hidden", !cockpitOpen);
+  cockpit.setAttribute("aria-hidden", String(!cockpitOpen));
+  if (cockpitOpen) {
+    ($("#cockpit-user") as HTMLElement).textContent = userTranscriptBuffer || "—";
+    ($("#cockpit-assistant") as HTMLElement).textContent = assistantTranscriptBuffer || response.textContent || "—";
+  }
+}
+
+function spinCharacter() {
+  characterRig.classList.remove("spin-active");
+  void characterRig.clientWidth;
+  characterRig.classList.add("spin-active");
+  setTimeout(() => characterRig.classList.remove("spin-active"), 1500);
+}
+
 function setWorker(role: string, label: string, active = true) {
   const card = document.querySelector<HTMLElement>(`.worker[data-role="${role}"]`);
   if (!card) return;
-  card.classList.toggle("active", active); card.querySelector("small")!.textContent = label;
+  const small = card.querySelector("small");
+  if (small) small.textContent = label;
+  card.classList.toggle("active", active);
 }
+
+function setupGestures() {
+  if (!currentWindow) return;
+  const rig = characterRig;
+  const STUDIO_THEMES_KEYS: StudioTheme[] = ["quantum", "reactor", "synthwave", "matrix", "arctic"];
+
+  // 滚轮：垂直调强度，水平切主题
+  let themeDebounce = 0;
+  rig.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+      const now = Date.now();
+      if (now - themeDebounce < 300) return;
+      themeDebounce = now;
+      const idx = STUDIO_THEMES_KEYS.indexOf(studioConfig.theme);
+      const next = STUDIO_THEMES_KEYS[(idx + (e.deltaX > 0 ? 1 : -1) + STUDIO_THEMES_KEYS.length) % STUDIO_THEMES_KEYS.length];
+      studioConfig.theme = next;
+      applyStudioConfig(studioConfig);
+    } else {
+      studioConfig.intensity = Math.min(100, Math.max(20, studioConfig.intensity + Math.round(-e.deltaY * 0.3)));
+      applyStudioConfig(studioConfig);
+    }
+  }, { passive: false });
+
+  // 拖动窗口（区分点击和拖拽）
+  let dragging = false;
+  let dragStartX = 0, dragStartY = 0;
+  rig.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    dragging = false;
+    dragStartX = e.clientX;
+    dragStartY = e.clientY;
+    rig.setPointerCapture(e.pointerId);
+  });
+  rig.addEventListener("pointermove", (e) => {
+    if (e.buttons === 0) return;
+    if (!dragging && Math.abs(e.clientX - dragStartX) + Math.abs(e.clientY - dragStartY) > 6) {
+      dragging = true;
+      runAsync("拖动窗口失败", currentWindow.startDragging());
+    }
+  });
+  rig.addEventListener("pointerup", () => { dragging = false; });
+
+  // 长按快速语音
+  let longPressTimer: ReturnType<typeof setTimeout> | null = null;
+  rig.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    longPressTimer = setTimeout(() => void startDirectVoice(), 550);
+  });
+  rig.addEventListener("pointerup", () => {
+    if (longPressTimer) clearTimeout(longPressTimer);
+    longPressTimer = null;
+  });
+  rig.addEventListener("pointercancel", () => {
+    if (longPressTimer) clearTimeout(longPressTimer);
+    longPressTimer = null;
+  });
+
+  // 捏合缩放（macOS WebKit gesture 事件）
+  let pinchStartScale = studioConfig.avatarScale;
+  document.addEventListener("gesturestart", (e) => {
+    e.preventDefault();
+    pinchStartScale = studioConfig.avatarScale;
+  });
+  document.addEventListener("gesturechange", (e) => {
+    e.preventDefault();
+    const ge = e as unknown as { scale: number };
+    studioConfig.avatarScale = Math.min(125, Math.max(75, Math.round(pinchStartScale * ge.scale)));
+    applyStudioConfig(studioConfig);
+  });
+  document.addEventListener("gestureend", (e) => { e.preventDefault(); });
+}
+
+setupGestures();
+
 function roleOf(params: any) {
   const text = JSON.stringify(params ?? {}).toLowerCase();
   return text.includes("research") ? "researcher" : text.includes("review") ? "reviewer" :
     text.includes("developer") || text.includes("commandexecution") || text.includes("filechange") ? "developer" : "orchestrator";
 }
+let waveAnimationFrame: number | null = null;
+let particleAnimationFrame: number | null = null;
+let audioMeterAnimationFrame: number | null = null;
+
 function drawWave() {
+  waveAnimationFrame = null;
+  if (document.hidden) return;
   const canvas = $("#wave") as HTMLCanvasElement, context = canvas.getContext("2d")!;
   context.clearRect(0, 0, canvas.width, canvas.height);
   const time = performance.now() / 370, amplitude = 5 + state.level * 42 + (state.mode === "speaking" ? 22 : 0);
@@ -209,9 +1066,9 @@ function drawWave() {
   }
   context.strokeStyle = state.mode === "working" ? "#ff9d2e" : state.mode === "stopped" ? "#ff3d33" : "#22c7ff";
   context.shadowColor = context.strokeStyle; context.shadowBlur = 15; context.lineWidth = 2; context.stroke();
-  state.level *= .9; requestAnimationFrame(drawWave);
+  state.level *= .9;
+  waveAnimationFrame = requestAnimationFrame(drawWave);
 }
-drawWave();
 
 type VisualParticle = {
   fromX: number;
@@ -402,6 +1259,8 @@ function drawFormationEnergy(now: number, rawProgress: number) {
 }
 
 function drawParticleField(now: number) {
+  particleAnimationFrame = null;
+  if (document.hidden) return;
   particleContext.clearRect(0, 0, particleCanvas.width, particleCanvas.height);
   if (visualParticles.length) {
     const rawProgress = (now - formationStartedAt) / FORMATION_DURATION;
@@ -444,13 +1303,12 @@ function drawParticleField(now: number) {
     if (forming) drawFormationEnergy(now, rawProgress);
     particleContext.globalCompositeOperation = "source-over";
   }
-  requestAnimationFrame(drawParticleField);
+  particleAnimationFrame = requestAnimationFrame(drawParticleField);
 }
 
 if (characterImage.complete && characterImage.naturalWidth) prepareVisualParticles();
 else characterImage.addEventListener("load", prepareVisualParticles, { once: true });
 new ResizeObserver(() => prepareVisualParticles()).observe(shell);
-requestAnimationFrame(drawParticleField);
 
 function analyserLevel(analyser: AnalyserNode | null) {
   if (!analyser) return 0;
@@ -465,6 +1323,8 @@ function analyserLevel(analyser: AnalyserNode | null) {
 }
 
 function updateAudioMeters() {
+  audioMeterAnimationFrame = null;
+  if (document.hidden) return;
   if (!currentWindow) {
     const time = performance.now();
     state.level = state.mode === "speaking"
@@ -476,7 +1336,7 @@ function updateAudioMeters() {
           : 0;
     shell.style.setProperty("--voice-pulse", String(1 + state.level * .026));
     shell.style.setProperty("--voice-glow", String(.45 + state.level * .55));
-    requestAnimationFrame(updateAudioMeters);
+    audioMeterAnimationFrame = requestAnimationFrame(updateAudioMeters);
     return;
   }
   const micLevel = analyserLevel(microphoneAnalyser);
@@ -488,14 +1348,36 @@ function updateAudioMeters() {
     if (speakerLevel > 0.08 && state.mode !== "speaking") setMode("speaking");
     if (speakerLevel < 0.025 && state.mode === "speaking") setMode("listening");
   }
-  requestAnimationFrame(updateAudioMeters);
+  audioMeterAnimationFrame = requestAnimationFrame(updateAudioMeters);
 }
-updateAudioMeters();
+
+function startVisualAnimations() {
+  if (document.hidden) return;
+  waveAnimationFrame ??= requestAnimationFrame(drawWave);
+  particleAnimationFrame ??= requestAnimationFrame(drawParticleField);
+  audioMeterAnimationFrame ??= requestAnimationFrame(updateAudioMeters);
+}
+
+function stopVisualAnimations() {
+  if (waveAnimationFrame !== null) cancelAnimationFrame(waveAnimationFrame);
+  if (particleAnimationFrame !== null) cancelAnimationFrame(particleAnimationFrame);
+  if (audioMeterAnimationFrame !== null) cancelAnimationFrame(audioMeterAnimationFrame);
+  waveAnimationFrame = null;
+  particleAnimationFrame = null;
+  audioMeterAnimationFrame = null;
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) stopVisualAnimations();
+  else startVisualAnimations();
+});
+startVisualAnimations();
 
 function updateVoiceInfo(info: DirectVoice) {
   state.directVoice = info;
   mic.classList.toggle("active", info.voiceActive);
-  $("#voice-auth").textContent = info.codexConnected
+  const va = $<HTMLElement>("#voice-auth");
+  if (va) va.textContent = info.codexConnected
     ? `${info.protocol} · ${info.voiceActive ? "connected" : info.phase}`
     : `${info.protocol} · standby`;
   if (info.threadId) {
@@ -507,8 +1389,8 @@ function updateVoiceInfo(info: DirectVoice) {
 
 async function handle(message: Message) {
   if (message.id !== undefined && message.method) {
-    triggerCharacterAction("approval", 1800);
-    approvalId = message.id; $("#approval-copy").textContent = `Codex 请求：${message.method}`; approval.showModal(); return;
+    enqueueApproval({ id: message.id, method: message.method });
+    return;
   }
   const method = message.method, params = message.params;
   if (method === "thread/realtime/sdp") {
@@ -532,8 +1414,9 @@ async function handle(message: Message) {
     banner.hidden = true;
     setMode("listening");
     triggerCharacterAction("acknowledge");
-    setWorker("orchestrator", "Official Voice online");
+    setWorker("orchestrator", "Voice 已上线");
     response.textContent = "Codex 官方 Voice 已上线。你现在可以直接和 Jarvis 对话。";
+    addDashboardEntry("Voice 会话已建立", "ready");
   } else if (method === "thread/realtime/transcript/delta") {
     const delta = typeof params?.delta === "string" ? params.delta : "";
     if (params?.role === "assistant") {
@@ -560,7 +1443,7 @@ async function handle(message: Message) {
     const itemType = String(params?.item?.type ?? "");
     if (itemType.includes("handoff") || itemType.includes("delegation")) {
       setMode("working");
-      setWorker("orchestrator", "Delegating to Codex");
+      setWorker("orchestrator", "委派给 Codex");
     }
   } else if (method === "thread/realtime/error") {
     triggerCharacterAction("error");
@@ -569,6 +1452,7 @@ async function handle(message: Message) {
     const detail = params?.message ?? "Codex Voice realtime error";
     $("#degraded-copy").textContent = detail;
     response.textContent = detail;
+    addDashboardEntry(`Voice 异常：${detail}`, "error");
   } else if (method === "thread/realtime/closed") {
     cleanupPeer();
     updateVoiceInfo({
@@ -587,7 +1471,8 @@ async function handle(message: Message) {
     if (state.manualStop) return;
     agentMessageBuffer = "";
     state.agentWorking = true;
-    setMode("working"); setWorker("orchestrator", "Codex working");
+    setMode("working"); setWorker("orchestrator", "执行中");
+    addDashboardEntry("任务开始执行", "working");
   } else if (method === "item/agentMessage/delta") {
     const delta = typeof params?.delta === "string" ? params.delta : "";
     agentMessageBuffer += delta;
@@ -596,15 +1481,15 @@ async function handle(message: Message) {
     state.agentWorking = false;
     if (!state.manualStop) triggerCharacterAction("complete", 1400);
     setMode(state.manualStop ? "stopped" : state.directVoice?.voiceActive ? "listening" : "ready");
-    setWorker("orchestrator", state.manualStop ? "Interrupted" : "Ready", !state.manualStop);
+    setWorker("orchestrator", state.manualStop ? "已中断" : "待命", !state.manualStop);
     for (const role of ["developer", "researcher", "reviewer"]) {
-      setWorker(role, state.manualStop ? "Interrupted" : "Standby", false);
+      setWorker(role, state.manualStop ? "已中断" : "待命", false);
     }
   } else if (method === "item/started") {
-    if (!state.manualStop) setWorker(roleOf(params), "Working");
+    if (!state.manualStop) { setWorker(roleOf(params), "工作中"); addDashboardEntry(`工具调用：${roleOf(params)}`, "tool"); }
   }
   else if (method === "item/completed") {
-    setWorker(roleOf(params), "Complete", false);
+    setWorker(roleOf(params), "完成", false); addDashboardEntry(`工具完成：${roleOf(params)}`, "done");
     if (params?.item?.type === "agentMessage") {
       const text = typeof params.item.text === "string" ? params.item.text : agentMessageBuffer;
       if (text) response.textContent = text;
@@ -649,6 +1534,9 @@ function cleanupPeer() {
   voiceAudio.srcObject = null;
   microphoneAnalyser = null;
   remoteAnalyser = null;
+  const context = audioContext;
+  audioContext = null;
+  if (context && context.state !== "closed") void context.close().catch(() => {});
 }
 
 const sleep = (milliseconds: number) =>
@@ -740,7 +1628,7 @@ async function startDirectVoice({ coldStart = false } = {}) {
       threadId: savedThreadId(),
       permissionMode,
       sdp,
-      voice: "cove",
+      voice: selectedVoice,
     });
     updateVoiceInfo(info);
   } catch (error) {
@@ -766,10 +1654,11 @@ async function stopDirectVoice() {
 }
 
 if (currentWindow) {
-  await listen<Message>("codex-event", ({ payload }) => void handle(payload));
+  await listen<Message>("codex-event", ({ payload }) => runAsync("处理 Codex 事件失败", handle(payload)));
   await listen<WakeStatus>("jarvis-wake-status", ({ payload }) => {
     state.wake = payload;
-    $("#wake-auth").textContent = payload.ready
+    const wa = $<HTMLElement>("#wake-auth");
+    if (wa) wa.textContent = payload.ready
       ? "Local listener ready"
       : payload.authorization === "authorized"
         ? "Waiting to re-arm"
@@ -803,66 +1692,576 @@ if (currentWindow) {
 $("#command-form").addEventListener("submit", async (event) => {
   event.preventDefault(); const input = $("#command-input") as HTMLInputElement, text = input.value.trim();
   if (!text) return;
-  state.manualStop = false;
-  transcript.textContent = text;
   input.value = "";
-  if (!currentWindow) {
-    response.textContent = "视觉预览：文字任务已切换为 Codex 工作态。";
+
+  // 本地指令拦截
+  const cmd = text.toLowerCase();
+  if (cmd === "驾驶舱" || cmd === "打开驾驶舱" || cmd === "cockpit") { toggleCockpit(true); return; }
+  if (cmd === "关闭驾驶舱" || cmd === "关闭" || cmd === "close cockpit") { toggleCockpit(false); return; }
+  if (cmd === "转动" || cmd === "转一下" || cmd === "spin" || cmd === "旋转") { spinCharacter(); return; }
+  if (cmd === "停止" || cmd === "stop") { ($("#stop") as HTMLButtonElement).click(); return; }
+  if (cmd === "仪表盘" || cmd === "dashboard" || cmd === "面板") { toggleDashboard(); return; }
+  if (cmd === "手势" || cmd === "摄像头" || cmd === "gesture" || cmd === "camera") { ($("#camera-gesture") as HTMLButtonElement).click(); return; }
+
+  try {
+    state.manualStop = false;
+    transcript.textContent = text;
+    if (!currentWindow) {
+      response.textContent = "视觉预览：文字任务已切换为 Codex 工作态。";
+      setMode("working");
+      return;
+    }
+    if (state.directVoice?.voiceActive) {
+      response.textContent = "已转向 — 指令已注入当前会话，Jarvis 正在调整执行方向。";
+      shell.classList.add("steering");
+      setTimeout(() => shell.classList.remove("steering"), 2200);
+      await invoke("append_codex_voice_text", { text });
+      return;
+    }
+    if (!state.session) {
+      state.session = await invoke<Session>("start_jarvis", {
+        cwd: workspace,
+        threadId: savedThreadId(),
+        permissionMode,
+      });
+      localStorage.setItem(`${THREAD_KEY_PREFIX}${workspace}`, state.session.threadId);
+      $("#thread-id").textContent = state.session.threadId;
+      $("#workspace").textContent = state.session.cwd;
+    }
     setMode("working");
-    return;
+    await invoke("send_text", { text });
+  } catch (error) {
+    setMode("degraded");
+    reportAsyncError("发送指令失败", error);
   }
-  if (state.directVoice?.voiceActive) {
-    response.textContent = "已将文字作为用户话语注入当前 Codex Voice 会话。";
-    await invoke("append_codex_voice_text", { text });
-    return;
-  }
-  if (!state.session) {
-    state.session = await invoke<Session>("start_jarvis", {
-      cwd: workspace,
-      threadId: savedThreadId(),
-      permissionMode,
-    });
-    localStorage.setItem(`${THREAD_KEY_PREFIX}${workspace}`, state.session.threadId);
-    $("#thread-id").textContent = state.session.threadId;
-    $("#workspace").textContent = state.session.cwd;
-  }
-  setMode("working");
-  await invoke("send_text", { text });
 });
 mic.addEventListener("click", () => {
-  if (state.directVoice?.voiceActive || peer) void stopDirectVoice();
-  else void startDirectVoice();
+  if (state.directVoice?.voiceActive || peer) runAsync("停止语音失败", stopDirectVoice());
+  else runAsync("启动语音失败", startDirectVoice());
 });
 $("#stop").addEventListener("click", async () => {
   triggerCharacterAction("error", 700);
   state.manualStop = true; setMode("stopped");
+  shell.classList.remove("steering");
   state.agentWorking = false;
   for (const role of ["orchestrator", "developer", "researcher", "reviewer"]) setWorker(role, "Interrupted", false);
   if (!currentWindow) return;
   if (state.directVoice?.voiceActive || peer) {
     try { await stopDirectVoice(); } catch { /* task interruption still continues */ }
   }
-  await invoke("stop_all");
-  await armWakeListener();
+  try {
+    await invoke("stop_all");
+    await armWakeListener();
+  } catch (error) {
+    reportAsyncError("停止任务失败", error);
+  }
 });
+
+$("#steer").addEventListener("click", () => {
+  if (!state.directVoice?.voiceActive && !state.session) {
+    void startDirectVoice();
+    return;
+  }
+  const input = $("#command-input") as HTMLInputElement;
+  input.value = "转向：";
+  input.focus();
+  input.setSelectionRange(3, 3);
+  shell.classList.add("steering");
+  response.textContent = "方向盘已激活 — 在输入框中输入你的新指令，Jarvis 将立即调整方向。";
+  setTimeout(() => shell.classList.remove("steering"), 3000);
+});
+function autonomyText(mode: PermissionMode): string {
+  return mode === "safe" ? $t("autonomyLow") : mode === "auto" ? $t("autonomyMid") : $t("autonomyHigh");
+}
+
 function syncPermissionControls() {
   const input = document.querySelector<HTMLInputElement>(
     `input[name="permission-mode"][value="${permissionMode}"]`,
   );
   if (input) input.checked = true;
-  $("#permission-mode-label").textContent = permissionLabels[permissionMode];
+  const slider = $("#autonomy-range") as HTMLInputElement;
+  if (slider) {
+    slider.value = String(permissionMode === "safe" ? 16 : permissionMode === "auto" ? 50 : 84);
+    ($("#autonomy-output") as HTMLOutputElement).textContent = autonomyText(permissionMode);
+  }
+  const pml = $<HTMLElement>("#permission-mode-label");
+  if (pml) pml.textContent = permissionLabels[permissionMode];
+  // 自治度驱动角色呼吸速度
+  const rate = permissionMode === "safe" ? "5.5s" : permissionMode === "auto" ? "4s" : "2.5s";
+  characterRig.style.animationDuration = rate;
+  shell.style.setProperty("--autonomy-level", permissionMode === "safe" ? "0.5" : permissionMode === "auto" ? "0.7" : "1");
+}
+
+$("#autonomy-range").addEventListener("input", () => {
+  // 只更新 UI 预览，不写 permissionMode —— 真正切换在 saveSettings 里发生，
+  // 否则保存时 nextPermission === permissionMode，重建运行时的分支永远进不去
+  const val = Number(($("#autonomy-range") as HTMLInputElement).value);
+  const mode: PermissionMode = val <= 33 ? "safe" : val <= 66 ? "auto" : "full";
+  ($("#autonomy-output") as HTMLOutputElement).textContent = autonomyText(mode);
+  const radio = document.querySelector<HTMLInputElement>(`input[name="permission-mode"][value="${mode}"]`);
+  if (radio) radio.checked = true;
+  settingsDirty = true;
+});
+
+function setupDialogDrag(dialog: HTMLDialogElement) {
+  if (dialog.dataset.dragReady) return; // 幂等：重复打开不再叠加监听
+  dialog.dataset.dragReady = "1";
+  const handle = dialog.querySelector<HTMLElement>(".drag-handle");
+  if (!handle) return;
+  handle.style.cursor = "move";
+  let startX = 0, startY = 0, left = 0, top = 0;
+  const onMove = (e: MouseEvent) => {
+    const rect = dialog.getBoundingClientRect();
+    const nextLeft = Math.min(Math.max(left + e.clientX - startX, 8 - rect.width * 0.5), window.innerWidth - rect.width * 0.5 - 8);
+    const nextTop = Math.min(Math.max(top + e.clientY - startY, 8), Math.max(8, window.innerHeight - 80));
+    dialog.style.top = `${nextTop}px`;
+    dialog.style.left = `${nextLeft}px`;
+  };
+  const onUp = () => {
+    window.removeEventListener("mousemove", onMove);
+    window.removeEventListener("mouseup", onUp);
+  };
+  handle.addEventListener("mousedown", (e) => {
+    if (e.button !== 0) return; // 只响应左键
+    const rect = dialog.getBoundingClientRect();
+    left = rect.left;
+    top = rect.top;
+    startX = e.clientX;
+    startY = e.clientY;
+    dialog.style.position = "fixed";
+    dialog.style.margin = "0";
+    dialog.style.top = `${top}px`;
+    dialog.style.left = `${left}px`;
+    dialog.style.translate = "0 0";
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    e.preventDefault();
+  });
+}
+
+function syncVoiceSelect() {
+  const select = $("#voice-select") as HTMLSelectElement;
+  if (select.children.length <= 1) {
+    for (const voice of SUPPORTED_VOICES) {
+      const option = document.createElement("option");
+      option.value = voice;
+      option.textContent = $voiceLabel(voice);
+      select.append(option);
+    }
+  }
+  select.value = selectedVoice;
+  syncVoiceSelectText();
+}
+
+function storedWakePhrase(): string | null {
+  const phrase = localStorage.getItem(WAKE_PHRASE_KEY)?.trim();
+  return phrase && phrase !== DEFAULT_WAKE_PHRASE ? phrase : null;
+}
+
+function syncWakePhrase() {
+  const input = $("#wake-phrase-input") as HTMLInputElement;
+  input.value = storedWakePhrase() ?? DEFAULT_WAKE_PHRASE;
 }
 
 $("#settings").addEventListener("click", () => {
+  if (settings.open) return; // 已打开时 showModal 会抛异常
   syncPermissionControls();
-  settings.showModal();
+  syncVoiceSelect();
+  syncWakePhrase();
+  settingsLanguageSnapshot = currentLang;
+  ($("#lang-select") as HTMLSelectElement).value = currentLang;
+  ($("#autostart-toggle") as HTMLInputElement).checked = autostartEnabled;
+  ($("#workspace-path") as HTMLElement).textContent = workspace || "—";
+  ($("#gesture-toggle") as HTMLInputElement).checked = gestureController.active;
+  settingsDirty = false;
+  ($("#settings-unsaved") as HTMLElement).hidden = true;
+  try {
+    settings.showModal();
+    applyLanguage(currentLang, false);
+    setupDialogDrag(settings);
+  } catch (error) {
+    response.textContent = `打开设置失败：${String(error)}`;
+  }
 });
-$("#close-settings").addEventListener("click", () => settings.close());
+settings.addEventListener("input", (e) => {
+  if (e.target instanceof HTMLElement && e.target.id === "gesture-toggle") return; // 手势开关即时生效，不算未保存改动
+  settingsDirty = true;
+});
+settings.addEventListener("change", (e) => {
+  if (e.target instanceof HTMLElement && e.target.id === "gesture-toggle") return;
+  settingsDirty = true;
+});
+
+function hideUnsavedBar() {
+  ($("#settings-unsaved") as HTMLElement).hidden = true;
+}
+
+function requestCloseSettings() {
+  if (settingsDirty) {
+    ($("#settings-unsaved") as HTMLElement).hidden = false;
+    ($("#settings-unsaved-text") as HTMLElement).textContent = $t("unsavedTitle");
+    ($("#unsaved-save") as HTMLElement).textContent = $t("unsavedSave");
+    ($("#unsaved-discard") as HTMLElement).textContent = $t("unsavedDiscard");
+    ($("#unsaved-keep") as HTMLElement).textContent = $t("unsavedKeep");
+    return;
+  }
+  hideUnsavedBar();
+  settings.close();
+}
+
+// Esc 原生触发 cancel，拦截后走统一确认流程
+settings.addEventListener("cancel", (e) => {
+  e.preventDefault();
+  requestCloseSettings();
+});
+// 任何路径关闭后都复位确认条
+settings.addEventListener("close", hideUnsavedBar);
+
+$("#close-settings").addEventListener("click", requestCloseSettings);
+$("#close-settings-top").addEventListener("click", requestCloseSettings);
+$("#gesture-help").addEventListener("click", () => {
+  if (!gestureGuide.open) gestureGuide.showModal();
+});
+$("#close-gesture-guide").addEventListener("click", () => gestureGuide.close());
+gestureGuide.addEventListener("click", (event) => {
+  if (event.target === gestureGuide) gestureGuide.close();
+});
+$("#unsaved-save").addEventListener("click", () => { void saveSettings(); });
+$("#unsaved-discard").addEventListener("click", () => {
+  applyLanguage(settingsLanguageSnapshot, false);
+  settingsDirty = false;
+  hideUnsavedBar();
+  settings.close();
+});
+$("#unsaved-keep").addEventListener("click", hideUnsavedBar);
+
+document.addEventListener("keydown", (event) => {
+  if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement || event.target instanceof HTMLTextAreaElement) return;
+  if (event.target instanceof HTMLButtonElement || event.target instanceof HTMLAnchorElement) return;
+  if (event.key === "Escape" && cockpitOpen) { toggleCockpit(false); return; }
+  if (event.key === "c" || event.key === "C") { toggleCockpit(); return; }
+  if (event.key === "s" || event.key === "S") { spinCharacter(); return; }
+  if (event.key === "d" || event.key === "D") { toggleDashboard(); return; }
+  if (event.key === "k" || event.key === "K") { ($("#camera-gesture") as HTMLButtonElement).click(); return; }
+  if (event.key === " ") { event.preventDefault(); toggleCockpit(); }
+});
+
+$("#cockpit").addEventListener("click", (e) => { if (e.target === cockpit) toggleCockpit(false); });
+
+const dashboard = $<HTMLElement>("#dashboard");
+const dashboardStream = $<HTMLElement>("#dashboard-stream");
+const dashboardStats = $<HTMLElement>("#dashboard-stats");
+let dashboardOpen = false;
+let dashboardToolCount = 0;
+
+function toggleDashboard(force?: boolean) {
+  dashboardOpen = force ?? !dashboardOpen;
+  dashboard.classList.toggle("hidden", !dashboardOpen);
+}
+
+function addDashboardEntry(text: string, kind: "tool" | "working" | "done" | "error" | "ready" = "tool") {
+  const entry = document.createElement("div");
+  entry.className = `dash-entry dash-${kind}`;
+  const icon = { tool: "⚙", working: "◎", done: "✓", error: "✕", ready: "◈" }[kind];
+  const time = new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  entry.textContent = `${icon} ${time}  ${text}`;
+  dashboardStream.appendChild(entry);
+  if (dashboardStream.children.length > 50) dashboardStream.removeChild(dashboardStream.firstChild!);
+  dashboardStream.scrollTop = dashboardStream.scrollHeight;
+  if (kind === "tool") dashboardToolCount++;
+  dashboardStats.textContent = `工具调用 ${dashboardToolCount} 次`;
+}
+
+$("#close-dashboard").addEventListener("click", () => toggleDashboard(false));
+
+const gestureController = new CameraGestureController();
+const gestureHud = $<HTMLElement>("#gesture-hud");
+const GESTURE_HUD_POSITION_KEY = "jarvis.gestureHudPosition.v1";
+const GESTURE_HUD_MARGIN = 8;
+
+interface GestureHudPosition {
+  x: number;
+  y: number;
+}
+
+function gestureHudBounds() {
+  const parent = (gestureHud.offsetParent as HTMLElement | null) ?? shell;
+  return {
+    parent,
+    maxX: Math.max(GESTURE_HUD_MARGIN, parent.clientWidth - gestureHud.offsetWidth - GESTURE_HUD_MARGIN),
+    maxY: Math.max(GESTURE_HUD_MARGIN, parent.clientHeight - gestureHud.offsetHeight - GESTURE_HUD_MARGIN),
+  };
+}
+
+function clampGestureHudPosition(position: GestureHudPosition): GestureHudPosition {
+  const { maxX, maxY } = gestureHudBounds();
+  return {
+    x: Math.min(maxX, Math.max(GESTURE_HUD_MARGIN, position.x)),
+    y: Math.min(maxY, Math.max(GESTURE_HUD_MARGIN, position.y)),
+  };
+}
+
+function applyGestureHudPosition(position: GestureHudPosition) {
+  const clamped = clampGestureHudPosition(position);
+  gestureHud.style.left = `${clamped.x}px`;
+  gestureHud.style.top = `${clamped.y}px`;
+  gestureHud.style.bottom = "auto";
+  gestureHud.style.transform = "none";
+}
+
+function saveGestureHudPosition() {
+  if (!gestureHud.style.top) return;
+  const position = clampGestureHudPosition({ x: gestureHud.offsetLeft, y: gestureHud.offsetTop });
+  localStorage.setItem(GESTURE_HUD_POSITION_KEY, JSON.stringify(position));
+}
+
+function restoreGestureHudPosition() {
+  try {
+    const stored = localStorage.getItem(GESTURE_HUD_POSITION_KEY);
+    if (!stored) return;
+    const position = JSON.parse(stored) as Partial<GestureHudPosition>;
+    if (Number.isFinite(position.x) && Number.isFinite(position.y)) {
+      applyGestureHudPosition({ x: position.x!, y: position.y! });
+    }
+  } catch {
+    localStorage.removeItem(GESTURE_HUD_POSITION_KEY);
+  }
+}
+
+function setupGestureHudDragging() {
+  let pointerId: number | null = null;
+  let grabOffsetX = 0;
+  let grabOffsetY = 0;
+
+  gestureHud.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    const { parent } = gestureHudBounds();
+    const rect = gestureHud.getBoundingClientRect();
+    const parentRect = parent.getBoundingClientRect();
+    grabOffsetX = event.clientX - rect.left;
+    grabOffsetY = event.clientY - rect.top;
+    applyGestureHudPosition({ x: rect.left - parentRect.left, y: rect.top - parentRect.top });
+    pointerId = event.pointerId;
+    gestureHud.setPointerCapture(pointerId);
+    gestureHud.classList.add("dragging");
+    event.preventDefault();
+  });
+
+  gestureHud.addEventListener("pointermove", (event) => {
+    if (pointerId !== event.pointerId) return;
+    const { parent } = gestureHudBounds();
+    const parentRect = parent.getBoundingClientRect();
+    applyGestureHudPosition({
+      x: event.clientX - parentRect.left - grabOffsetX,
+      y: event.clientY - parentRect.top - grabOffsetY,
+    });
+  });
+
+  const finishDragging = (event: PointerEvent) => {
+    if (pointerId !== event.pointerId) return;
+    if (gestureHud.hasPointerCapture(pointerId)) gestureHud.releasePointerCapture(pointerId);
+    pointerId = null;
+    gestureHud.classList.remove("dragging");
+    saveGestureHudPosition();
+  };
+  gestureHud.addEventListener("pointerup", finishDragging);
+  gestureHud.addEventListener("pointercancel", finishDragging);
+
+  window.addEventListener("resize", () => {
+    if (!gestureHud.style.top) return;
+    applyGestureHudPosition({ x: gestureHud.offsetLeft, y: gestureHud.offsetTop });
+    saveGestureHudPosition();
+  });
+
+  requestAnimationFrame(restoreGestureHudPosition);
+}
+
+setupGestureHudDragging();
+
+function stopGestureControl() {
+  gestureController.stop();
+  gestureHud.classList.add("hidden");
+  ($("#camera-gesture") as HTMLButtonElement).classList.remove("active");
+  ($("#gesture-toggle") as HTMLInputElement).checked = false;
+}
+
+async function prepareForBackground() {
+  stopVisualAnimations();
+  if (gestureController.active) stopGestureControl();
+  if (state.directVoice?.voiceActive || peer) {
+    try {
+      await stopDirectVoice();
+    } catch {
+      cleanupPeer();
+    }
+  }
+  await armWakeListener();
+}
+
+window.addEventListener("pagehide", () => {
+  stopVisualAnimations();
+  if (gestureController.active) stopGestureControl();
+  cleanupPeer();
+});
+
+function handleGestureEvent(event: GestureEvent) {
+  gestureHud.classList.remove("gesture-flash");
+  void gestureHud.clientWidth;
+  gestureHud.classList.add("gesture-flash");
+  switch (event.action) {
+    case "stop":
+      ($("#stop") as HTMLButtonElement).click();
+      break;
+    case "confirm":
+      triggerCharacterAction("acknowledge");
+      break;
+    case "approve":
+      if (approval.open) {
+        void resolveActiveApproval(true);
+      } else {
+        triggerCharacterAction("complete");
+      }
+      break;
+    case "cockpit":
+      toggleCockpit(true);
+      break;
+    case "spin":
+      spinCharacter();
+      break;
+    case "voice":
+      void startDirectVoice();
+      break;
+  }
+}
+
+$("#camera-gesture").addEventListener("click", async () => {
+  const button = $("#camera-gesture") as HTMLButtonElement;
+  if (gestureController.active) {
+    stopGestureControl();
+    return;
+  }
+  button.classList.add("active");
+  gestureHud.classList.remove("hidden");
+  ($("#gesture-toggle") as HTMLInputElement).checked = true;
+  button.disabled = true;
+  try {
+    const ok = await gestureController.start(
+      $("#gesture-video") as HTMLVideoElement,
+      handleGestureEvent,
+      (message) => {
+        localStorage.setItem("jarvis.camera.lastError", `${new Date().toISOString()} ${message}`);
+        response.textContent = `摄像头手势不可用：${message}`;
+        stopGestureControl();
+      },
+    );
+    if (ok) {
+      localStorage.removeItem("jarvis.camera.lastError");
+    }
+  } finally {
+    button.disabled = false;
+  }
+});
+cockpit.querySelector(".cockpit-stop")?.addEventListener("click", () => { toggleCockpit(false); ($("#stop") as HTMLButtonElement).click(); });
+cockpit.querySelector(".cockpit-steer")?.addEventListener("click", () => {
+  toggleCockpit(false);
+  const input = $("#command-input") as HTMLInputElement;
+  input.value = "转向 ";
+  input.focus();
+});
+$("#studio").addEventListener("click", openStudio);
+$("#open-studio").addEventListener("click", openStudio);
+$("#pick-workspace").addEventListener("click", async () => {
+  // 原生目录选择：webkitdirectory 只能拿到相对路径，拼出来的是假绝对路径
+  try {
+    const picked = await openNativeDialog({
+      directory: true,
+      multiple: false,
+      defaultPath: workspace || undefined,
+      title: $t("settingsWorkspaceSection"),
+    });
+    if (typeof picked === "string" && picked) {
+      // 注意：不写全局 workspace —— saveSettings 靠"显示路径 ≠ workspace"来判断是否要保存
+      ($("#workspace-path") as HTMLElement).textContent = picked;
+      settingsDirty = true;
+    }
+  } catch (error) {
+    response.textContent = `${$t("pickFolderError")}：${String(error)}`;
+  }
+});
+$("#lang-select").addEventListener("change", () => {
+  const lang = ($("#lang-select") as HTMLSelectElement).value as Lang;
+  if (lang !== currentLang) applyLanguage(lang, false);
+});
+$("#close-studio").addEventListener("click", () => studio.close());
+$("#apply-studio").addEventListener("click", () => studio.close());
+for (const button of document.querySelectorAll<HTMLButtonElement>("[data-studio-theme]")) {
+  button.addEventListener("click", () => {
+    const theme = button.dataset.studioTheme as StudioTheme;
+    applyStudioConfig({ ...studioConfig, theme });
+    syncStudioControls();
+  });
+}
+for (const button of document.querySelectorAll<HTMLButtonElement>("[data-studio-layout]")) {
+  button.addEventListener("click", () => {
+    applyStudioLayout(button.dataset.studioLayout as StudioLayout);
+  });
+}
+for (const button of document.querySelectorAll<HTMLButtonElement>("[data-studio-preview-state]")) {
+  button.addEventListener("click", () => {
+    setStudioPreviewState(button.dataset.studioPreviewState as StudioPreviewState);
+  });
+}
+for (const selector of [
+  "#studio-callsign",
+  "#studio-subtitle",
+  "#studio-intensity",
+  "#studio-scale",
+  "#studio-workers",
+  "#studio-dialogue",
+  "#studio-wave",
+  "#studio-compact",
+]) {
+  $(selector).addEventListener("input", () => {
+    applyStudioConfig(studioConfigFromControls());
+    syncStudioControls();
+  });
+}
+$("#reset-studio").addEventListener("click", () => {
+  applyStudioConfig({ ...STUDIO_DEFAULTS });
+  syncStudioControls();
+});
+$("#export-studio").addEventListener("click", () => {
+  const blob = new Blob([`${JSON.stringify(studioConfig, null, 2)}\n`], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `${studioConfig.callsign.toLowerCase().replace(/[^a-z0-9]+/g, "-") || "jarvis"}-core.json`;
+  link.click();
+  URL.revokeObjectURL(url);
+});
+$("#import-studio").addEventListener("change", async (event) => {
+  const input = event.currentTarget as HTMLInputElement;
+  const file = input.files?.[0];
+  if (!file) return;
+  try {
+    applyStudioConfig(normalizeStudioConfig(JSON.parse(await file.text())));
+    syncStudioControls();
+    response.textContent = `已装配配置：${studioConfig.callsign.toUpperCase()} CORE`;
+  } catch (error) {
+    response.textContent = `DIY 配置导入失败：${String(error)}`;
+  } finally {
+    input.value = "";
+  }
+});
 $("#new-thread").addEventListener("click", async () => {
+  if (settingsDirty) {
+    requestCloseSettings();
+    return;
+  }
   const button = $("#new-thread") as HTMLButtonElement;
   button.disabled = true;
   state.manualStop = true;
-  settings.close();
+  if (settings.open) settings.close();
   response.textContent = "正在结束当前任务并创建新的 Codex thread…";
   try {
     if (state.directVoice?.voiceActive || peer) {
@@ -883,10 +2282,10 @@ $("#new-thread").addEventListener("click", async () => {
     userTranscriptBuffer = "";
     assistantTranscriptBuffer = "";
     agentMessageBuffer = "";
-    transcript.textContent = "“新开线程”";
-    response.textContent = "新的 Codex thread 已创建。下一次唤醒和文字任务都会进入这个线程。";
+    transcript.textContent = `"${$t("transcriptNew")}"`;
+    response.textContent = $t("transcriptNewMsg");
     setMode("ready");
-    setWorker("orchestrator", "Fresh thread ready");
+    setWorker("orchestrator", $t("workerFresh"));
   } catch (error) {
     try { await invoke("shutdown"); } catch { /* already stopped */ }
     state.session = null;
@@ -898,37 +2297,110 @@ $("#new-thread").addEventListener("click", async () => {
     await armWakeListener();
   }
 });
-$("#save-settings").addEventListener("click", async () => {
-  const nextWorkspace = ($("#workspace-setting") as HTMLInputElement).value.trim();
-  if (!nextWorkspace) return;
-  const selectedPermission = document.querySelector<HTMLInputElement>(
-    'input[name="permission-mode"]:checked',
-  )?.value as PermissionMode | undefined;
-  const nextPermission = selectedPermission ?? permissionMode;
-  if (nextWorkspace !== workspace) {
-    localStorage.setItem(WORKSPACE_KEY, nextWorkspace);
-    response.textContent = "工作目录已保存，重启 Jarvis 后生效。";
-  }
-  if (nextPermission !== permissionMode) {
-    state.manualStop = true;
-    if (state.directVoice?.voiceActive || peer) {
-      try { await stopDirectVoice(); } catch { cleanupPeer(); }
+async function saveSettings() {
+  try {
+    const nextWorkspace = ($("#workspace-path") as HTMLElement).textContent?.trim() || "";
+    if (!nextWorkspace || nextWorkspace === "—") return;
+
+    const nextLang = ($("#lang-select") as HTMLSelectElement).value as Lang;
+
+    const enteredWakePhrase = ($("#wake-phrase-input") as HTMLInputElement).value.trim();
+    const nextWakePhrase = enteredWakePhrase && enteredWakePhrase !== DEFAULT_WAKE_PHRASE
+      ? enteredWakePhrase
+      : null;
+    const wakePhraseChanged = nextWakePhrase !== storedWakePhrase();
+
+    const selectedPermission = document.querySelector<HTMLInputElement>(
+      'input[name="permission-mode"]:checked',
+    )?.value as PermissionMode | undefined;
+    const nextPermission = selectedPermission ?? permissionMode;
+    if (nextPermission === "full" && permissionMode !== "full" && !window.confirm($t("fullAccessConfirm"))) {
+      return;
     }
-    try { await invoke("stop_all"); } catch { /* no active runtime */ }
-    await invoke("shutdown");
-    permissionMode = nextPermission;
-    localStorage.setItem(PERMISSION_KEY, permissionMode);
-    state.session = null;
-    state.directVoice = null;
-    syncPermissionControls();
-    setMode("ready");
-    response.textContent = `权限已切换为“${permissionLabels[permissionMode]}”，下一次任务将续接当前 Codex thread。`;
-    await armWakeListener();
+    const nextAutostart = ($("#autostart-toggle") as HTMLInputElement).checked;
+    const nextVoice = validVoiceId(($("#voice-select") as HTMLSelectElement).value);
+
+    applyLanguage(nextLang);
+    if (nextWakePhrase) localStorage.setItem(WAKE_PHRASE_KEY, nextWakePhrase);
+    else localStorage.removeItem(WAKE_PHRASE_KEY);
+
+    if (nextAutostart !== autostartEnabled) {
+      await invoke("set_autostart", { enabled: nextAutostart });
+      autostartEnabled = nextAutostart;
+    }
+    if (nextVoice !== selectedVoice) {
+      selectedVoice = nextVoice;
+      localStorage.setItem(VOICE_KEY, selectedVoice);
+      response.textContent = typeof T.voiceSaved.zh === "function" ? $t("voiceSaved", $voiceLabel(selectedVoice)) : "";
+    }
+    if (nextWorkspace !== workspace) {
+      localStorage.setItem(WORKSPACE_KEY, nextWorkspace);
+      response.textContent = $t("workspaceSaved");
+    }
+    if (wakePhraseChanged) await invoke("disarm_wake_listener");
+    let wakeListenerRearmed = false;
+    if (nextPermission !== permissionMode) {
+      state.manualStop = true;
+      if (state.directVoice?.voiceActive || peer) {
+        try { await stopDirectVoice(); } catch { cleanupPeer(); }
+      }
+      try { await invoke("stop_all"); } catch { /* no active runtime */ }
+      await invoke("shutdown");
+      permissionMode = nextPermission;
+      localStorage.setItem(PERMISSION_KEY, permissionMode);
+      state.session = null;
+      state.directVoice = null;
+      syncPermissionControls();
+      setMode("ready");
+      response.textContent = $t("permChanged", permissionLabels[permissionMode]);
+      await armWakeListener();
+      wakeListenerRearmed = true;
+    }
+    if (wakePhraseChanged && !wakeListenerRearmed) await armWakeListener();
+    settingsLanguageSnapshot = currentLang;
+    settingsDirty = false;
+    settings.close();
+  } catch (error) {
+    response.textContent = `保存设置失败：${String(error)}`;
   }
-  settings.close();
+}
+
+$("#save-settings").addEventListener("click", () => saveSettings());
+
+$("#gesture-toggle").addEventListener("change", async () => {
+  const checked = ($("#gesture-toggle") as HTMLInputElement).checked;
+  if (checked) {
+    try {
+      const status = await invoke<string>("request_camera_permission");
+      if (status !== "authorized") {
+        ($("#gesture-toggle") as HTMLInputElement).checked = false;
+        response.textContent = "摄像头权限未授予，请在系统弹窗中点击「允许」后重试。";
+        return;
+      }
+      ($("#camera-gesture") as HTMLButtonElement).click();
+    } catch (error) {
+      ($("#gesture-toggle") as HTMLInputElement).checked = false;
+      response.textContent = `摄像头授权失败：${String(error)}`;
+    }
+  } else {
+    if (gestureController.active) {
+      stopGestureControl();
+    }
+  }
 });
+
+for (const radio of document.querySelectorAll<HTMLInputElement>('input[name="permission-mode"]')) {
+  radio.addEventListener("change", () => {
+    if (!radio.checked) return;
+    // 同上：只同步滑块与文案预览，不提前改写 permissionMode
+    const mode = radio.value as PermissionMode;
+    ($("#autonomy-range") as HTMLInputElement).value = String(mode === "safe" ? 16 : mode === "auto" ? 50 : 84);
+    ($("#autonomy-output") as HTMLOutputElement).textContent = autonomyText(mode);
+    settingsDirty = true;
+  });
+}
 for (const [selector, approved] of [["#approve", true], ["#deny", false]] as const) {
-  $(selector).addEventListener("click", async () => { await invoke("resolve_server_request", { requestId: approvalId, approved }); approval.close(); });
+  $(selector).addEventListener("click", () => { void resolveActiveApproval(approved); });
 }
 
 if (currentWindow) {
@@ -936,11 +2408,17 @@ if (currentWindow) {
     workspace = localStorage.getItem(WORKSPACE_KEY)
       ?? await invoke<string>("default_workspace");
     localStorage.setItem(WORKSPACE_KEY, workspace);
-    $("#thread-id").textContent = "Not started";
+    try {
+      autostartEnabled = await invoke<boolean>("autostart_status");
+    } catch {
+      autostartEnabled = false;
+    }
+    $("#thread-id").textContent = $t("notStarted");
     $("#workspace").textContent = workspace;
-    ($("#workspace-setting") as HTMLInputElement).value = workspace;
+    $("#workspace-path").textContent = workspace;
     syncPermissionControls();
-    setWorker("orchestrator", "Wake word starting");
+    setWorker("orchestrator", "唤醒词启动中");
+    applyLanguage();
     setMode("ready");
     const backgroundStart = await invoke<boolean>("startup_is_background");
     if (!backgroundStart) {
@@ -952,19 +2430,24 @@ if (currentWindow) {
           "请在系统设置 → 隐私与安全性 → 麦克风中允许 Jarvis Codex。";
       }
     }
-    await armWakeListener();
     updateVoiceInfo(await invoke<DirectVoice>("direct_voice_status"));
-    if (await invoke<boolean>("consume_cold_wake")) {
+    const coldWake = await invoke<boolean>("consume_cold_wake");
+    if (coldWake) {
       transcript.textContent = "“嗨，Jarvis”";
+    } else {
+      await armWakeListener();
     }
   } catch (error) { setMode("stopped"); response.textContent = `启动失败：${String(error)}`; }
 } else {
-  workspace = "Visual preview · native systems disconnected";
+  workspace = "/Users/reson/JarvisWorkspace";
   $("#thread-id").textContent = "Preview only";
-  $("#workspace").textContent = workspace;
-  ($("#workspace-setting") as HTMLInputElement).value = workspace;
-  $("#wake-auth").textContent = "Preview · not connected";
-  $("#voice-auth").textContent = "Preview · not connected";
+  const wp = $<HTMLElement>("#workspace");
+  if (wp) wp.textContent = workspace;
+  ($("#workspace-path") as HTMLElement).textContent = workspace;
+  const wa2 = $<HTMLElement>("#wake-auth");
+  if (wa2) wa2.textContent = "Preview · not connected";
+  const va2 = $<HTMLElement>("#voice-auth");
+  if (va2) va2.textContent = "Preview · not connected";
   transcript.textContent = visualPreviewMode === "stopped" ? "“停下”" : "“嗨，Jarvis”";
   response.textContent = visualPreviewMode === "voice-starting"
     ? "正在从粒子中重构 Jarvis 核心…"
@@ -987,14 +2470,16 @@ if (currentWindow) {
 
 async function armWakeListener() {
   try {
-    state.wake = await invoke<WakeStatus>("arm_wake_listener");
-    $("#wake-auth").textContent = state.wake.ready ? "Local listener ready" : state.wake.authorization;
+    state.wake = await invoke<WakeStatus>("arm_wake_listener", { wakePhrase: storedWakePhrase() });
+    const wa3 = $<HTMLElement>("#wake-auth");
+    if (wa3) wa3.textContent = state.wake.ready ? "Local listener ready" : state.wake.authorization;
     if (["denied", "restricted"].includes(state.wake.authorization)) {
       setMode("degraded");
       banner.hidden = false;
       $("#degraded-copy").textContent = "请在系统设置 → 隐私与安全性中允许麦克风和语音识别。";
     }
   } catch (error) {
-    $("#wake-auth").textContent = String(error);
+    const wa4 = $<HTMLElement>("#wake-auth");
+    if (wa4) wa4.textContent = String(error);
   }
 }
