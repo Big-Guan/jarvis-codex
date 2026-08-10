@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open as openNativeDialog } from "@tauri-apps/plugin-dialog";
 import { CameraGestureController, type GestureEvent } from "./gesture-camera";
+import { parseSettingsCommand, type SettingsCommand } from "./settings-command.js";
 import "./style.css";
 
 type Mode = "booting" | "ready" | "voice-starting" | "listening" | "working" | "speaking" | "degraded" | "stopped";
@@ -134,6 +135,8 @@ const T = {
   settingsPermissionSection: { zh: "操作权限", en: "Permission" },
   settingsPermissionHint: { zh: "切换将重建 Codex 运行时", en: "Rebuilds Codex runtime" },
   settingsRuntimeSection: { zh: "运行状态", en: "Runtime status" },
+  settingsCommandSection: { zh: "贾维斯控制", en: "Jarvis control" },
+  settingsCommandCopy: { zh: "可直接说或输入设置指令，例如：打开摄像头、音色设为 Cove、权限改为安全模式、主题切换为矩阵。说“设置帮助”可查看全部能力。", en: "Speak or type settings commands, such as: enable camera, set voice to Cove, use safe permission mode, or set theme to Matrix. Say “settings help” for all options." },
   settingsSafe: { zh: "安全模式", en: "Safe" },
   settingsSafeDesc: { zh: "越界或高风险时询问确认", en: "Ask before risky operations" },
   settingsAuto: { zh: "自动办公", en: "Auto" },
@@ -157,20 +160,26 @@ const T = {
   gestureToggleHint: { zh: "首次开启时 macOS 会弹出系统授权对话框，请点「允许」", en: "macOS will ask for camera permission on first enable — click Allow" },
   gestureHelp: { zh: "查看手势", en: "View gestures" },
   gestureGuideTitle: { zh: "手势控制说明", en: "Gesture controls" },
-  gestureGuideIntro: { zh: "将单手完整放入摄像头画面，保持约 0.3 秒即可触发。", en: "Keep one full hand in view for about 0.3 seconds to trigger an action." },
-  gestureStopName: { zh: "停止", en: "Stop" },
-  gestureStopDesc: { zh: "张开手掌或拇指向下", en: "Open palm or thumbs down" },
+  gestureGuideIntro: { zh: "将手完整放入画面并保持约 0.3 秒；双手组合保持约 0.4 秒。", en: "Keep your hand in view for about 0.3 seconds, or a two-hand shortcut for 0.4 seconds." },
+  gestureStopName: { zh: "停止 / 拒绝", en: "Stop / deny" },
+  gestureStopDesc: { zh: "拇指向下；有授权弹窗时表示拒绝", en: "Thumbs down; denies an open approval prompt" },
+  gestureDashboardName: { zh: "切换仪表盘", en: "Toggle dashboard" },
+  gestureDashboardDesc: { zh: "单手张开手掌", en: "One open palm" },
   gestureConfirmName: { zh: "确认", en: "Confirm" },
-  gestureConfirmDesc: { zh: "握紧拳头", en: "Closed fist" },
+  gestureConfirmDesc: { zh: "单手握拳；有授权弹窗时确认", en: "One closed fist; confirms an open approval prompt" },
   gestureApproveName: { zh: "批准", en: "Approve" },
   gestureApproveDesc: { zh: "拇指向上", en: "Thumbs up" },
-  gestureCockpitName: { zh: "打开驾驶舱", en: "Open cockpit" },
+  gestureCockpitName: { zh: "切换驾驶舱", en: "Toggle cockpit" },
   gestureCockpitDesc: { zh: "伸出食指和中指，比出 V 字", en: "Victory / V sign" },
   gestureSpinName: { zh: "360° 旋转", en: "360° spin" },
   gestureSpinDesc: { zh: "伸出拇指、食指和小指", en: "I-love-you hand sign" },
-  gestureVoiceName: { zh: "语音对话", en: "Voice conversation" },
-  gestureVoiceDesc: { zh: "食指向上", en: "Point one finger up" },
-  gestureReleaseTip: { zh: "每次触发后请先松手，再做下一个手势。", en: "Release your hand after each action before making the next gesture." },
+  gestureVoiceName: { zh: "切换语音对话", en: "Toggle Voice" },
+  gestureVoiceDesc: { zh: "食指向上；再次触发可结束语音", en: "Point up; repeat after releasing to end Voice" },
+  gestureSettingsName: { zh: "切换系统设置", en: "Toggle Settings" },
+  gestureSettingsDesc: { zh: "双手同时张开", en: "Two open palms" },
+  gestureStudioName: { zh: "切换 DIY 工作台", en: "Toggle DIY Studio" },
+  gestureStudioDesc: { zh: "双手同时握拳", en: "Two closed fists" },
+  gestureReleaseTip: { zh: "全局防误触：每次触发后必须让手势回到自然状态，再做下一项。", en: "Global release lock: return to a neutral pose before making the next gesture." },
   autostartLabel: { zh: "后台启动", en: "Background startup" },
   autostartToggleLabel: { zh: "登录 macOS 时后台启动 Jarvis", en: "Start Jarvis in the background at login" },
   autostartToggleHint: { zh: "可随时关闭；关闭后仍可手动启动 Jarvis", en: "You can disable this at any time and still launch Jarvis manually" },
@@ -262,7 +271,7 @@ function applyLanguage(lang: Lang | null = null, persist = true) {
     const cards = document.querySelectorAll<HTMLElement>("#settings-dialog .settings-card .section-heading");
     const cardTitles: (keyof typeof T)[] = [
       "wakePhraseLabel", "gestureLabel", "autostartLabel", "langLabel", "settingsVoiceSection",
-      "settingsWorkspaceSection", "settingsPermissionSection", "settingsRuntimeSection",
+      "settingsWorkspaceSection", "settingsPermissionSection", "settingsRuntimeSection", "settingsCommandSection",
     ];
     for (let i = 0; i < cards.length && i < cardTitles.length; i++) {
       const b = cards[i].querySelector("b");
@@ -291,6 +300,8 @@ function applyLanguage(lang: Lang | null = null, persist = true) {
     ($("#gesture-guide-intro") as HTMLElement).textContent = $t("gestureGuideIntro");
     ($("#gesture-stop-name") as HTMLElement).textContent = $t("gestureStopName");
     ($("#gesture-stop-desc") as HTMLElement).textContent = $t("gestureStopDesc");
+    ($("#gesture-dashboard-name") as HTMLElement).textContent = $t("gestureDashboardName");
+    ($("#gesture-dashboard-desc") as HTMLElement).textContent = $t("gestureDashboardDesc");
     ($("#gesture-confirm-name") as HTMLElement).textContent = $t("gestureConfirmName");
     ($("#gesture-confirm-desc") as HTMLElement).textContent = $t("gestureConfirmDesc");
     ($("#gesture-approve-name") as HTMLElement).textContent = $t("gestureApproveName");
@@ -301,6 +312,10 @@ function applyLanguage(lang: Lang | null = null, persist = true) {
     ($("#gesture-spin-desc") as HTMLElement).textContent = $t("gestureSpinDesc");
     ($("#gesture-voice-name") as HTMLElement).textContent = $t("gestureVoiceName");
     ($("#gesture-voice-desc") as HTMLElement).textContent = $t("gestureVoiceDesc");
+    ($("#gesture-settings-name") as HTMLElement).textContent = $t("gestureSettingsName");
+    ($("#gesture-settings-desc") as HTMLElement).textContent = $t("gestureSettingsDesc");
+    ($("#gesture-studio-name") as HTMLElement).textContent = $t("gestureStudioName");
+    ($("#gesture-studio-desc") as HTMLElement).textContent = $t("gestureStudioDesc");
     ($("#gesture-release-tip") as HTMLElement).textContent = $t("gestureReleaseTip");
     ($("#close-gesture-guide") as HTMLButtonElement).ariaLabel = $t("close");
     ($("#autostart-toggle-label") as HTMLElement).textContent = $t("autostartToggleLabel");
@@ -316,6 +331,7 @@ function applyLanguage(lang: Lang | null = null, persist = true) {
     ($("#runtime-workspace-label") as HTMLElement).textContent = $t("workspaceLabel");
     ($("#runtime-permission-label") as HTMLElement).textContent = $t("permissionLabel");
     ($("#runtime-voice-label") as HTMLElement).textContent = $t("voiceKernelLabel");
+    ($("#settings-command-copy") as HTMLElement).textContent = $t("settingsCommandCopy");
     ($("#wake-phrase-input") as HTMLInputElement).placeholder = $t("wakePhrasePlaceholder");
     ($("#settings-unsaved-text") as HTMLElement).textContent = $t("unsavedTitle");
     ($("#unsaved-save") as HTMLElement).textContent = $t("unsavedSave");
@@ -621,6 +637,12 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
       </dl>
     </section>
 
+    <section class="settings-card settings-command-card">
+      <div class="section-heading"><span>09</span><div><b>贾维斯控制</b></div></div>
+      <p id="settings-command-copy">可直接说或输入设置指令，例如：打开摄像头、音色设为 Cove、权限改为安全模式、主题切换为矩阵。说“设置帮助”可查看全部能力。</p>
+      <div class="settings-command-examples" aria-hidden="true"><span>打开摄像头</span><span>切换英文</span><span>音色 Cove</span><span>主题矩阵</span></div>
+    </section>
+
     <p class="info-block">每个工作目录续接自己的 Codex thread，新开线程后原线程仍保留在 Codex 历史记录中。唤醒词在本机识别；Jarvis 通过 Codex app-server V3 WebRTC 进入官方 Voice 线程，复用本机 Codex 登录，不模拟点击、不建立第二套 GPT-Live 会话。</p>
 
     <div id="settings-unsaved" class="settings-unsaved" hidden>
@@ -645,16 +667,19 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
       <div><span>CAMERA GESTURES</span><h2 id="gesture-guide-title">手势控制说明</h2></div>
       <button id="close-gesture-guide" class="settings-close-btn" aria-label="关闭">×</button>
     </header>
-    <p id="gesture-guide-intro" class="gesture-guide-intro">将单手完整放入摄像头画面，保持约 0.3 秒即可触发。</p>
+    <p id="gesture-guide-intro" class="gesture-guide-intro">将手完整放入画面并保持约 0.3 秒；双手组合保持约 0.4 秒。</p>
     <div class="gesture-guide-grid">
-      <article class="gesture-guide-card"><span class="gesture-guide-icon">✋<i>👎</i></span><div><b id="gesture-stop-name">停止</b><small id="gesture-stop-desc">张开手掌或拇指向下</small></div></article>
-      <article class="gesture-guide-card"><span class="gesture-guide-icon">✊</span><div><b id="gesture-confirm-name">确认</b><small id="gesture-confirm-desc">握紧拳头</small></div></article>
+      <article class="gesture-guide-card"><span class="gesture-guide-icon">👎</span><div><b id="gesture-stop-name">停止 / 拒绝</b><small id="gesture-stop-desc">拇指向下；有授权弹窗时表示拒绝</small></div></article>
+      <article class="gesture-guide-card"><span class="gesture-guide-icon">✋</span><div><b id="gesture-dashboard-name">切换仪表盘</b><small id="gesture-dashboard-desc">单手张开手掌</small></div></article>
+      <article class="gesture-guide-card"><span class="gesture-guide-icon">✊</span><div><b id="gesture-confirm-name">确认</b><small id="gesture-confirm-desc">单手握拳；有授权弹窗时确认</small></div></article>
       <article class="gesture-guide-card"><span class="gesture-guide-icon">👍</span><div><b id="gesture-approve-name">批准</b><small id="gesture-approve-desc">拇指向上</small></div></article>
-      <article class="gesture-guide-card"><span class="gesture-guide-icon">✌️</span><div><b id="gesture-cockpit-name">打开驾驶舱</b><small id="gesture-cockpit-desc">伸出食指和中指，比出 V 字</small></div></article>
+      <article class="gesture-guide-card"><span class="gesture-guide-icon">✌️</span><div><b id="gesture-cockpit-name">切换驾驶舱</b><small id="gesture-cockpit-desc">伸出食指和中指，比出 V 字</small></div></article>
       <article class="gesture-guide-card"><span class="gesture-guide-icon">🤟</span><div><b id="gesture-spin-name">360° 旋转</b><small id="gesture-spin-desc">伸出拇指、食指和小指</small></div></article>
-      <article class="gesture-guide-card"><span class="gesture-guide-icon">☝️</span><div><b id="gesture-voice-name">语音对话</b><small id="gesture-voice-desc">食指向上</small></div></article>
+      <article class="gesture-guide-card"><span class="gesture-guide-icon">☝️</span><div><b id="gesture-voice-name">切换语音对话</b><small id="gesture-voice-desc">食指向上；再次触发可结束语音</small></div></article>
+      <article class="gesture-guide-card"><span class="gesture-guide-icon">✋✋</span><div><b id="gesture-settings-name">切换系统设置</b><small id="gesture-settings-desc">双手同时张开</small></div></article>
+      <article class="gesture-guide-card"><span class="gesture-guide-icon">✊✊</span><div><b id="gesture-studio-name">切换 DIY 工作台</b><small id="gesture-studio-desc">双手同时握拳</small></div></article>
     </div>
-    <p id="gesture-release-tip" class="gesture-release-tip">每次触发后请先松手，再做下一个手势。</p>
+    <p id="gesture-release-tip" class="gesture-release-tip">全局防误触：每次触发后必须让手势回到自然状态，再做下一项。</p>
   </dialog>
   <dialog id="studio-dialog" class="studio-dialog">
     <header class="studio-header">
@@ -1438,6 +1463,7 @@ async function handle(message: Message) {
       if (text) transcript.textContent = text;
       userTranscriptBuffer = "";
       if (text) triggerCharacterAction("acknowledge");
+      if (text) await handleSettingsCommandText(text, "voice");
     }
   } else if (method === "thread/realtime/itemAdded") {
     const itemType = String(params?.item?.type ?? "");
@@ -1689,10 +1715,219 @@ if (currentWindow) {
     void startDirectVoice({ coldStart: payload.cold === true });
   });
 }
+
+type SettingsCommandSource = "text" | "voice";
+let lastVoiceSettingsCommand = "";
+let lastVoiceSettingsCommandAt = 0;
+
+function settingCopy(zh: string, en: string) {
+  return currentLang === "en" ? en : zh;
+}
+
+function configuredWorkspace() {
+  return localStorage.getItem(WORKSPACE_KEY) ?? workspace;
+}
+
+function canArmWakeListenerNow() {
+  return Boolean(currentWindow && !voiceStartInFlight && !state.directVoice?.voiceActive && !peer);
+}
+
+function announceSettingChange(message: string, source: SettingsCommandSource) {
+  response.textContent = message;
+  triggerCharacterAction("complete");
+  addDashboardEntry(`${source === "voice" ? "语音设置" : "设置指令"}：${message}`, "done");
+}
+
+function syncAllSettingsControls() {
+  syncPermissionControls();
+  syncVoiceSelect();
+  syncWakePhrase();
+  ($("#lang-select") as HTMLSelectElement).value = currentLang;
+  ($("#autostart-toggle") as HTMLInputElement).checked = autostartEnabled;
+  ($("#gesture-toggle") as HTMLInputElement).checked = gestureController.active;
+  ($("#workspace-path") as HTMLElement).textContent = configuredWorkspace() || "—";
+  syncStudioControls();
+}
+
+function settingsStatusCopy() {
+  const gestureEnabled = gestureController.active;
+  const workspaceValue = configuredWorkspace() || "—";
+  if (currentLang === "en") {
+    return `Settings: gestures ${gestureEnabled ? "on" : "off"}; launch at login ${autostartEnabled ? "on" : "off"}; language ${currentLang}; voice ${selectedVoice}; permission ${permissionMode}; workspace ${workspaceValue}; theme ${studioConfig.theme}; layout ${studioConfig.layout}.`;
+  }
+  return `当前设置：手势${gestureEnabled ? "已开启" : "已关闭"}；后台启动${autostartEnabled ? "已开启" : "已关闭"}；语言${currentLang === "zh" ? "中文" : "英文"}；音色 ${selectedVoice}；权限${permissionLabels[permissionMode]}；目录 ${workspaceValue}；主题 ${studioConfig.theme}；布局 ${studioConfig.layout}。`;
+}
+
+function settingsHelpCopy() {
+  return settingCopy(
+    "我可以控制：摄像头手势、后台启动、中文/英文、19 种音色、唤醒词、工作目录、权限模式、系统代号、副标题、主题、布局、能量强度、角色比例和 HUD 模块。示例：‘打开摄像头’、‘音色设为 Cove’、‘权限改为安全模式’、‘主题切换为矩阵’。",
+    "I can control camera gestures, launch at login, language, 19 voices, wake phrase, workspace, permission mode, callsign, subtitle, theme, layout, intensity, avatar scale, and HUD modules. Try: ‘enable camera’, ‘set voice to Cove’, ‘use safe permission mode’, or ‘set theme to Matrix’.",
+  );
+}
+
+async function executeSettingsCommand(command: SettingsCommand, source: SettingsCommandSource) {
+  switch (command.kind) {
+    case "open-settings":
+      if (studio.open) studio.close();
+      if (!settings.open) ($("#settings") as HTMLButtonElement).click();
+      announceSettingChange(settingCopy("设置已打开。", "Settings opened."), source);
+      break;
+    case "close-settings":
+      if (settings.open) requestCloseSettings();
+      announceSettingChange(settingCopy("已处理关闭设置请求。", "Settings close request handled."), source);
+      break;
+    case "open-studio":
+      if (!studio.open) openStudio();
+      announceSettingChange(settingCopy("DIY 工作台已打开。", "DIY Studio opened."), source);
+      break;
+    case "close-studio":
+      if (studio.open) studio.close();
+      announceSettingChange(settingCopy("DIY 工作台已关闭。", "DIY Studio closed."), source);
+      break;
+    case "show-status":
+      announceSettingChange(settingsStatusCopy(), source);
+      break;
+    case "show-help":
+      announceSettingChange(settingsHelpCopy(), source);
+      break;
+    case "set-gesture": {
+      const changed = await setGestureControlEnabled(command.enabled);
+      if (changed) announceSettingChange(settingCopy(
+        `摄像头手势已${command.enabled ? "开启" : "关闭"}。`,
+        `Camera gestures ${command.enabled ? "enabled" : "disabled"}.`,
+      ), source);
+      break;
+    }
+    case "set-autostart":
+      if (command.enabled !== autostartEnabled) {
+        if (currentWindow) await invoke("set_autostart", { enabled: command.enabled });
+        autostartEnabled = command.enabled;
+      }
+      ($("#autostart-toggle") as HTMLInputElement).checked = autostartEnabled;
+      announceSettingChange(settingCopy(
+        `后台启动已${command.enabled ? "开启" : "关闭"}。`,
+        `Launch at login ${command.enabled ? "enabled" : "disabled"}.`,
+      ), source);
+      break;
+    case "set-language":
+      applyLanguage(command.language);
+      ($("#lang-select") as HTMLSelectElement).value = command.language;
+      announceSettingChange(settingCopy("界面语言已切换为中文。", "Interface language changed to English."), source);
+      break;
+    case "set-voice":
+      selectedVoice = validVoiceId(command.voice);
+      localStorage.setItem(VOICE_KEY, selectedVoice);
+      syncVoiceSelect();
+      announceSettingChange($t("voiceSaved", $voiceLabel(selectedVoice)), source);
+      break;
+    case "set-wake-phrase": {
+      const useDefault = /^(?:默认|重置|default|reset)$/i.test(command.value);
+      const nextPhrase = useDefault ? null : command.value.slice(0, 64);
+      if (nextPhrase) localStorage.setItem(WAKE_PHRASE_KEY, nextPhrase);
+      else localStorage.removeItem(WAKE_PHRASE_KEY);
+      syncWakePhrase();
+      if (canArmWakeListenerNow()) {
+        await invoke("disarm_wake_listener");
+        await armWakeListener();
+      }
+      announceSettingChange(settingCopy(
+        `唤醒词已设为“${nextPhrase ?? DEFAULT_WAKE_PHRASE}”。`,
+        `Wake phrase set to “${nextPhrase ?? DEFAULT_WAKE_PHRASE}”.`,
+      ), source);
+      break;
+    }
+    case "set-workspace": {
+      const nextWorkspace = command.path.trim();
+      if (!nextWorkspace.startsWith("/")) {
+        announceSettingChange(settingCopy("工作目录必须使用以 / 开头的绝对路径。", "Workspace must be an absolute path beginning with /."), source);
+        break;
+      }
+      localStorage.setItem(WORKSPACE_KEY, nextWorkspace);
+      ($("#workspace-path") as HTMLElement).textContent = nextWorkspace;
+      announceSettingChange(settingCopy(`工作目录已保存为 ${nextWorkspace}，重启后生效。`, `Workspace saved as ${nextWorkspace}; restart to apply.`), source);
+      break;
+    }
+    case "set-permission": {
+      const changed = await applyPermissionMode(command.mode);
+      if (changed) announceSettingChange($t("permChanged", permissionLabels[permissionMode]), source);
+      break;
+    }
+    case "reset-studio":
+      applyStudioConfig({ ...STUDIO_DEFAULTS });
+      syncStudioControls();
+      announceSettingChange(settingCopy("视觉外观已恢复默认。", "Visual appearance restored to defaults."), source);
+      break;
+    case "set-theme":
+      applyStudioConfig({ ...studioConfig, theme: command.theme });
+      syncStudioControls();
+      announceSettingChange(settingCopy(`主题已切换为 ${STUDIO_THEMES[command.theme].label}。`, `Theme changed to ${STUDIO_THEMES[command.theme].label}.`), source);
+      break;
+    case "set-layout":
+      applyStudioLayout(command.layout);
+      announceSettingChange(settingCopy(`布局已切换为 ${command.layout}。`, `Layout changed to ${command.layout}.`), source);
+      break;
+    case "set-intensity":
+      applyStudioConfig({ ...studioConfig, intensity: command.value });
+      syncStudioControls();
+      announceSettingChange(settingCopy(`能量强度已调整为 ${studioConfig.intensity}%。`, `Effect intensity set to ${studioConfig.intensity}%.`), source);
+      break;
+    case "set-avatar-scale":
+      applyStudioConfig({ ...studioConfig, avatarScale: command.value });
+      syncStudioControls();
+      announceSettingChange(settingCopy(`角色比例已调整为 ${studioConfig.avatarScale}%。`, `Avatar scale set to ${studioConfig.avatarScale}%.`), source);
+      break;
+    case "set-callsign":
+      applyStudioConfig({ ...studioConfig, callsign: command.value });
+      syncStudioControls();
+      announceSettingChange(settingCopy(`系统代号已改为 ${studioConfig.callsign.toUpperCase()}。`, `Callsign changed to ${studioConfig.callsign.toUpperCase()}.`), source);
+      break;
+    case "set-subtitle":
+      applyStudioConfig({ ...studioConfig, subtitle: command.value });
+      syncStudioControls();
+      announceSettingChange(settingCopy(`核心副标题已改为 ${studioConfig.subtitle}。`, `Core subtitle changed to ${studioConfig.subtitle}.`), source);
+      break;
+    case "set-module": {
+      const nextConfig = { ...studioConfig };
+      if (command.module === "workers") nextConfig.showWorkers = command.enabled;
+      if (command.module === "dialogue") nextConfig.showDialogue = command.enabled;
+      if (command.module === "wave") nextConfig.showWave = command.enabled;
+      if (command.module === "compact") nextConfig.compactControls = command.enabled;
+      applyStudioConfig(nextConfig);
+      syncStudioControls();
+      const labels = { workers: "协作面板", dialogue: "对话字幕", wave: "声波反馈", compact: "极简控制" };
+      announceSettingChange(`${labels[command.module]}已${command.enabled ? "开启" : "关闭"}。`, source);
+      break;
+    }
+  }
+  // Preserve unrelated edits that the user has made in an open settings dialog.
+  if (!settingsDirty) syncAllSettingsControls();
+}
+
+async function handleSettingsCommandText(text: string, source: SettingsCommandSource) {
+  const command = parseSettingsCommand(text);
+  if (!command) return false;
+  if (source === "voice") {
+    const now = Date.now();
+    if (text === lastVoiceSettingsCommand && now - lastVoiceSettingsCommandAt < 2500) return true;
+    lastVoiceSettingsCommand = text;
+    lastVoiceSettingsCommandAt = now;
+  } else {
+    transcript.textContent = text;
+  }
+  try {
+    await executeSettingsCommand(command, source);
+  } catch (error) {
+    reportAsyncError(settingCopy("设置指令执行失败", "Settings command failed"), error);
+  }
+  return true;
+}
+
 $("#command-form").addEventListener("submit", async (event) => {
   event.preventDefault(); const input = $("#command-input") as HTMLInputElement, text = input.value.trim();
   if (!text) return;
   input.value = "";
+
+  if (await handleSettingsCommandText(text, "text")) return;
 
   // 本地指令拦截
   const cmd = text.toLowerCase();
@@ -1871,7 +2106,7 @@ $("#settings").addEventListener("click", () => {
   settingsLanguageSnapshot = currentLang;
   ($("#lang-select") as HTMLSelectElement).value = currentLang;
   ($("#autostart-toggle") as HTMLInputElement).checked = autostartEnabled;
-  ($("#workspace-path") as HTMLElement).textContent = workspace || "—";
+  ($("#workspace-path") as HTMLElement).textContent = configuredWorkspace() || "—";
   ($("#gesture-toggle") as HTMLInputElement).checked = gestureController.active;
   settingsDirty = false;
   ($("#settings-unsaved") as HTMLElement).hidden = true;
@@ -2108,12 +2343,18 @@ function handleGestureEvent(event: GestureEvent) {
   gestureHud.classList.remove("gesture-flash");
   void gestureHud.clientWidth;
   gestureHud.classList.add("gesture-flash");
+  addDashboardEntry(`手势：${event.label} · ${Math.round(event.score * 100)}%`, "ready");
   switch (event.action) {
     case "stop":
-      ($("#stop") as HTMLButtonElement).click();
+      if (approval.open) void resolveActiveApproval(false);
+      else ($("#stop") as HTMLButtonElement).click();
       break;
     case "confirm":
-      triggerCharacterAction("acknowledge");
+      if (approval.open) void resolveActiveApproval(true);
+      else {
+        triggerCharacterAction("acknowledge");
+        response.textContent = "手势已确认。";
+      }
       break;
     case "approve":
       if (approval.open) {
@@ -2122,36 +2363,54 @@ function handleGestureEvent(event: GestureEvent) {
         triggerCharacterAction("complete");
       }
       break;
+    case "dashboard":
+      toggleDashboard();
+      break;
     case "cockpit":
-      toggleCockpit(true);
+      toggleCockpit();
       break;
     case "spin":
       spinCharacter();
       break;
     case "voice":
-      void startDirectVoice();
+      if (state.directVoice?.voiceActive || peer) runAsync("手势停止语音失败", stopDirectVoice());
+      else runAsync("手势启动语音失败", startDirectVoice());
+      break;
+    case "settings":
+      if (settings.open) requestCloseSettings();
+      else {
+        if (studio.open) studio.close();
+        ($("#settings") as HTMLButtonElement).click();
+      }
+      break;
+    case "studio":
+      if (studio.open) studio.close();
+      else openStudio();
       break;
   }
 }
 
-$("#camera-gesture").addEventListener("click", async () => {
+async function startGestureControl() {
   const button = $("#camera-gesture") as HTMLButtonElement;
-  if (gestureController.active) {
-    stopGestureControl();
-    return;
-  }
+  if (gestureController.active) return true;
+  if (button.disabled) return false;
   button.classList.add("active");
   gestureHud.classList.remove("hidden");
   ($("#gesture-toggle") as HTMLInputElement).checked = true;
   button.disabled = true;
+  let ok = false;
   try {
-    const ok = await gestureController.start(
+    ok = await gestureController.start(
       $("#gesture-video") as HTMLVideoElement,
       handleGestureEvent,
       (message) => {
         localStorage.setItem("jarvis.camera.lastError", `${new Date().toISOString()} ${message}`);
         response.textContent = `摄像头手势不可用：${message}`;
         stopGestureControl();
+      },
+      (message) => {
+        response.textContent = message;
+        addDashboardEntry(message, "ready");
       },
     );
     if (ok) {
@@ -2160,6 +2419,38 @@ $("#camera-gesture").addEventListener("click", async () => {
   } finally {
     button.disabled = false;
   }
+  return ok;
+}
+
+async function setGestureControlEnabled(enabled: boolean) {
+  if (!enabled) {
+    stopGestureControl();
+    return true;
+  }
+  if (gestureController.active) {
+    ($("#gesture-toggle") as HTMLInputElement).checked = true;
+    return true;
+  }
+  try {
+    if (currentWindow) {
+      const status = await invoke<string>("request_camera_permission");
+      if (status !== "authorized") {
+        ($("#gesture-toggle") as HTMLInputElement).checked = false;
+        response.textContent = "摄像头权限未授予，请在系统弹窗中点击「允许」后重试。";
+        return false;
+      }
+    }
+    return await startGestureControl();
+  } catch (error) {
+    stopGestureControl();
+    response.textContent = `摄像头授权失败：${String(error)}`;
+    return false;
+  }
+}
+
+$("#camera-gesture").addEventListener("click", async () => {
+  if (gestureController.active) await setGestureControlEnabled(false);
+  else await setGestureControlEnabled(true);
 });
 cockpit.querySelector(".cockpit-stop")?.addEventListener("click", () => { toggleCockpit(false); ($("#stop") as HTMLButtonElement).click(); });
 cockpit.querySelector(".cockpit-steer")?.addEventListener("click", () => {
@@ -2297,6 +2588,40 @@ $("#new-thread").addEventListener("click", async () => {
     await armWakeListener();
   }
 });
+
+async function applyPermissionMode(nextPermission: PermissionMode, confirmFull = true) {
+  if (
+    confirmFull
+    && nextPermission === "full"
+    && permissionMode !== "full"
+    && !window.confirm($t("fullAccessConfirm"))
+  ) {
+    response.textContent = settingCopy("已取消开启完全访问。", "Full Access was not enabled.");
+    return false;
+  }
+  if (nextPermission === permissionMode) {
+    syncPermissionControls();
+    return true;
+  }
+
+  state.manualStop = true;
+  if (currentWindow) {
+    if (state.directVoice?.voiceActive || peer) {
+      try { await stopDirectVoice(); } catch { cleanupPeer(); }
+    }
+    try { await invoke("stop_all"); } catch { /* no active runtime */ }
+    await invoke("shutdown");
+  }
+  permissionMode = nextPermission;
+  localStorage.setItem(PERMISSION_KEY, permissionMode);
+  state.session = null;
+  state.directVoice = null;
+  syncPermissionControls();
+  setMode("ready");
+  if (currentWindow) await armWakeListener();
+  return true;
+}
+
 async function saveSettings() {
   try {
     const nextWorkspace = ($("#workspace-path") as HTMLElement).textContent?.trim() || "";
@@ -2337,26 +2662,14 @@ async function saveSettings() {
       localStorage.setItem(WORKSPACE_KEY, nextWorkspace);
       response.textContent = $t("workspaceSaved");
     }
-    if (wakePhraseChanged) await invoke("disarm_wake_listener");
-    let wakeListenerRearmed = false;
+    const canRearmWakeListener = canArmWakeListenerNow();
+    if (wakePhraseChanged && canRearmWakeListener) await invoke("disarm_wake_listener");
+    const permissionChanged = nextPermission !== permissionMode;
     if (nextPermission !== permissionMode) {
-      state.manualStop = true;
-      if (state.directVoice?.voiceActive || peer) {
-        try { await stopDirectVoice(); } catch { cleanupPeer(); }
-      }
-      try { await invoke("stop_all"); } catch { /* no active runtime */ }
-      await invoke("shutdown");
-      permissionMode = nextPermission;
-      localStorage.setItem(PERMISSION_KEY, permissionMode);
-      state.session = null;
-      state.directVoice = null;
-      syncPermissionControls();
-      setMode("ready");
+      await applyPermissionMode(nextPermission, false);
       response.textContent = $t("permChanged", permissionLabels[permissionMode]);
-      await armWakeListener();
-      wakeListenerRearmed = true;
     }
-    if (wakePhraseChanged && !wakeListenerRearmed) await armWakeListener();
+    if (wakePhraseChanged && !permissionChanged && canRearmWakeListener) await armWakeListener();
     settingsLanguageSnapshot = currentLang;
     settingsDirty = false;
     settings.close();
@@ -2369,24 +2682,7 @@ $("#save-settings").addEventListener("click", () => saveSettings());
 
 $("#gesture-toggle").addEventListener("change", async () => {
   const checked = ($("#gesture-toggle") as HTMLInputElement).checked;
-  if (checked) {
-    try {
-      const status = await invoke<string>("request_camera_permission");
-      if (status !== "authorized") {
-        ($("#gesture-toggle") as HTMLInputElement).checked = false;
-        response.textContent = "摄像头权限未授予，请在系统弹窗中点击「允许」后重试。";
-        return;
-      }
-      ($("#camera-gesture") as HTMLButtonElement).click();
-    } catch (error) {
-      ($("#gesture-toggle") as HTMLInputElement).checked = false;
-      response.textContent = `摄像头授权失败：${String(error)}`;
-    }
-  } else {
-    if (gestureController.active) {
-      stopGestureControl();
-    }
-  }
+  await setGestureControlEnabled(checked);
 });
 
 for (const radio of document.querySelectorAll<HTMLInputElement>('input[name="permission-mode"]')) {

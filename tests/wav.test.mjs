@@ -24,6 +24,10 @@ const gestureController = await readFile(
   new URL("../src/gesture-camera.ts", import.meta.url),
   "utf8",
 );
+const gestureEngine = await readFile(
+  new URL("../src/gesture-engine.js", import.meta.url),
+  "utf8",
+);
 const tauriConfig = JSON.parse(
   await readFile(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"),
 );
@@ -144,6 +148,25 @@ test("settings preview, defaults, and autostart remain transactional", () => {
   assert.equal([...backend.matchAll(/app\.autolaunch\(\)\.enable\(\)/g)].length, 1);
 });
 
+test("text and Voice can safely control every settings surface", () => {
+  assert.match(frontend, /parseSettingsCommand/);
+  assert.match(frontend, /await handleSettingsCommandText\(text, "text"\)/);
+  assert.match(frontend, /await handleSettingsCommandText\(text, "voice"\)/);
+  assert.match(frontend, /async function executeSettingsCommand/);
+  assert.match(frontend, /case "set-autostart":/);
+  assert.match(frontend, /invoke\("set_autostart", \{ enabled: command\.enabled \}\)/);
+  assert.match(frontend, /case "set-gesture":/);
+  assert.match(frontend, /await setGestureControlEnabled\(command\.enabled\)/);
+  assert.match(frontend, /case "set-permission":/);
+  assert.match(frontend, /await applyPermissionMode\(command\.mode\)/);
+  assert.match(frontend, /window\.confirm\(\$t\("fullAccessConfirm"\)\)/);
+  assert.match(frontend, /case "set-theme":/);
+  assert.match(frontend, /case "set-module":/);
+  assert.match(frontend, /id="settings-command-copy"/);
+  assert.match(frontend, /function canArmWakeListenerNow/);
+  assert.match(frontend, /if \(!settingsDirty\) syncAllSettingsControls\(\)/);
+});
+
 test("approval and media resources have bounded lifecycles", () => {
   assert.match(frontend, /const approvalQueue: ApprovalRequest\[\]/);
   assert.match(frontend, /async function resolveActiveApproval/);
@@ -174,13 +197,20 @@ test("bundled gesture model is a complete MediaPipe task archive", () => {
   assert.ok(gestureModel.lastIndexOf(Buffer.from("PK\x05\x06", "binary")) > 0, "gesture model has no ZIP directory");
 });
 
-test("gesture controls cover stop, spin, cockpit, and draggable camera preview", () => {
-  assert.match(gestureController, /Thumb_Down:\s*\{\s*action:\s*"stop"/);
-  assert.match(gestureController, /ILoveYou:\s*\{\s*action:\s*"spin"/);
-  assert.match(gestureController, /latchedGesture/);
-  assert.match(gestureController, /RELEASE_FRAMES/);
+test("gesture v2 covers all controls, two-hand shortcuts, and draggable camera preview", () => {
+  assert.match(gestureEngine, /Thumb_Down:\s*\{[\s\S]*?action:\s*"stop"/);
+  assert.match(gestureEngine, /Open_Palm:\s*\{[\s\S]*?action:\s*"dashboard"/);
+  assert.match(gestureEngine, /ILoveYou:\s*\{[\s\S]*?action:\s*"spin"/);
+  assert.match(gestureEngine, /"Open_Palm\+Open_Palm":\s*\{[\s\S]*?action:\s*"settings"/);
+  assert.match(gestureEngine, /"Closed_Fist\+Closed_Fist":\s*\{[\s\S]*?action:\s*"studio"/);
+  assert.match(gestureEngine, /class GestureLatch/);
+  assert.match(gestureEngine, /conflicting multi-hand pose is not a release/);
+  assert.match(gestureController, /numHands:\s*2/);
   assert.match(frontend, /case "spin":\s*spinCharacter\(\)/);
-  assert.match(frontend, /case "cockpit":\s*toggleCockpit\(true\)/);
+  assert.match(frontend, /case "cockpit":\s*toggleCockpit\(\)/);
+  assert.match(frontend, /case "dashboard":\s*toggleDashboard\(\)/);
+  assert.match(frontend, /case "settings":/);
+  assert.match(frontend, /case "studio":/);
   assert.match(frontend, /GESTURE_HUD_POSITION_KEY = "jarvis\.gestureHudPosition\.v1"/);
   assert.match(frontend, /gestureHud\.addEventListener\("pointerdown"/);
   assert.match(frontend, /gestureHud\.addEventListener\("pointermove"/);
@@ -193,7 +223,7 @@ test("gesture controls cover stop, spin, cockpit, and draggable camera preview",
   assert.doesNotMatch(hudMarkup, /gesture-info|gesture-hint|手势识别中/);
   const guideStart = frontend.indexOf('<dialog id="gesture-guide-dialog"');
   const guideEnd = frontend.indexOf('<dialog id="studio-dialog"', guideStart);
-  assert.equal((frontend.slice(guideStart, guideEnd).match(/class="gesture-guide-card"/g) ?? []).length, 6);
+  assert.equal((frontend.slice(guideStart, guideEnd).match(/class="gesture-guide-card"/g) ?? []).length, 9);
   assert.match(stylesheet, /\.gesture-hud\.dragging\{[^}]*cursor:grabbing/);
   assert.match(stylesheet, /\.gesture-toggle-line\{[^}]*display:flex/);
   assert.match(stylesheet, /@keyframes character-spin\{[^}]*rotateY\(0\)[\s\S]*rotateY\(360deg\)/);

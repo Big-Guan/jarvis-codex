@@ -1,6 +1,12 @@
 import { FilesetResolver, GestureRecognizer } from "@mediapipe/tasks-vision";
+import {
+  GESTURE_ACTION_COUNT,
+  GestureLatch,
+  selectGestureCandidate,
+  type GestureAction,
+} from "./gesture-engine.js";
 
-export type GestureAction = "stop" | "confirm" | "approve" | "cockpit" | "spin" | "voice";
+export type { GestureAction } from "./gesture-engine.js";
 
 export interface GestureEvent {
   action: GestureAction;
@@ -8,27 +14,7 @@ export interface GestureEvent {
   score: number;
 }
 
-interface GestureBinding {
-  action: GestureAction;
-  zh: string;
-  en: string;
-  minScore: number;
-  holdFrames: number;
-}
-
-const GESTURE_MAP: Record<string, GestureBinding> = {
-  Open_Palm: { action: "stop", zh: "张开手掌 · 停止", en: "Open palm", minScore: 0.6, holdFrames: 3 },
-  Thumb_Down: { action: "stop", zh: "拇指向下 · 停止", en: "Thumbs down", minScore: 0.62, holdFrames: 3 },
-  Closed_Fist: { action: "confirm", zh: "握拳 · 确认", en: "Fist", minScore: 0.68, holdFrames: 3 },
-  Thumb_Up: { action: "approve", zh: "比赞 · 批准", en: "Thumbs up", minScore: 0.68, holdFrames: 3 },
-  Victory: { action: "cockpit", zh: "胜利手势 · 打开驾驶舱", en: "Victory", minScore: 0.62, holdFrames: 3 },
-  ILoveYou: { action: "spin", zh: "我爱你手势 · 旋转", en: "I love you", minScore: 0.62, holdFrames: 3 },
-  Pointing_Up: { action: "voice", zh: "手指向上 · 语音", en: "Point up", minScore: 0.68, holdFrames: 3 },
-};
-
-const COOLDOWN_MS = 1600;
 const FRAME_INTERVAL_MS = 90;
-const RELEASE_FRAMES = 3;
 const WASM_ROOT = "/wasm";
 const MODEL_PATH = "/gesture_recognizer.task";
 
@@ -46,11 +32,7 @@ export class CameraGestureController {
   private stream: MediaStream | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private video: HTMLVideoElement | null = null;
-  private holdGesture = "";
-  private holdCount = 0;
-  private latchedGesture = "";
-  private releaseCount = 0;
-  private cooldownUntil = 0;
+  private latch = new GestureLatch();
   active = false;
 
   async start(
@@ -92,7 +74,7 @@ export class CameraGestureController {
         const modelAssetBuffer = new Uint8Array(await modelResponse.arrayBuffer());
         const options = {
           runningMode: "VIDEO" as const,
-          numHands: 1,
+          numHands: 2,
         };
         try {
           this.recognizer = await GestureRecognizer.createFromOptions(vision, {
@@ -114,11 +96,8 @@ export class CameraGestureController {
         }
       }
       this.active = true;
-      this.cooldownUntil = 0;
-      this.holdCount = 0;
-      this.holdGesture = "";
-      this.latchedGesture = "";
-      this.releaseCount = 0;
+      this.latch.reset();
+      onStatus?.(`手势识别已就绪：支持 ${GESTURE_ACTION_COUNT} 种控制动作。`);
       this.timer = setInterval(() => this.tick(onGesture), FRAME_INTERVAL_MS);
       return true;
     } catch (error) {
@@ -137,30 +116,12 @@ export class CameraGestureController {
     } catch {
       return;
     }
-    const top = result.gestures?.[0]?.[0];
-    const name = top?.categoryName ?? "";
-    const meta = GESTURE_MAP[name];
-    if (!top || !meta || top.score < meta.minScore) {
-      this.holdGesture = "";
-      this.holdCount = 0;
-      this.releaseCount += 1;
-      if (this.releaseCount >= RELEASE_FRAMES) this.latchedGesture = "";
-      return;
-    }
-    this.releaseCount = 0;
-    if (name === this.latchedGesture) return;
-    if (name === this.holdGesture) {
-      this.holdCount += 1;
-    } else {
-      this.holdGesture = name;
-      this.holdCount = 1;
-    }
-    if (this.holdCount >= meta.holdFrames && now >= this.cooldownUntil) {
-      this.cooldownUntil = now + COOLDOWN_MS;
-      this.holdCount = 0;
-      this.latchedGesture = name;
-      onGesture({ action: meta.action, label: meta.zh, score: top.score });
-    }
+    const detections = (result.gestures ?? [])
+      .map((categories) => categories[0])
+      .filter((category) => Boolean(category))
+      .map((category) => ({ name: category.categoryName, score: category.score }));
+    const event = this.latch.update(selectGestureCandidate(detections), now);
+    if (event) onGesture({ action: event.action, label: event.zh, score: event.score });
   }
 
   stop() {
@@ -177,9 +138,6 @@ export class CameraGestureController {
     this.recognizer?.close();
     this.recognizer = null;
     this.active = false;
-    this.holdGesture = "";
-    this.holdCount = 0;
-    this.latchedGesture = "";
-    this.releaseCount = 0;
+    this.latch.reset();
   }
 }
