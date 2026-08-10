@@ -13,13 +13,15 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Big-Guan/jarvis-codex/releases/latest">下载最新版 DMG</a>
+  <a href="https://github.com/ResonZone/jarvis-codex">ResonZone 代码仓库</a>
+  ·
+  <a href="https://github.com/Big-Guan/jarvis-codex">原始项目</a>
   ·
   <a href="CONTRIBUTING.md">参与贡献</a>
 </p>
 
 <p align="center">
-  <img src="public/assets/jarvis-character-v2.png" width="520" alt="Jarvis Codex 透明角色界面">
+  <img src="docs/images/jarvis-main-v2.png" width="960" alt="Jarvis Codex 最新主界面与任务仪表盘">
 </p>
 
 Jarvis × Codex 是一个 macOS 本地语音工作入口。说出唤醒词后，透明窗口从桌面升起，
@@ -27,24 +29,59 @@ Jarvis × Codex 是一个 macOS 本地语音工作入口。说出唤醒词后，
 Codex 线程。你可以自然对话、打断回复、继续追问，也可以让 Codex 在选定项目中
 真正执行任务。
 
+> **维护分支说明（更新于 2026 年 8 月 10 日）：**本仓库基于
+> [Big-Guan/jarvis-codex](https://github.com/Big-Guan/jarvis-codex) 修改，
+> 原项目由 [Leo Zhang（@Big-Guan）](https://github.com/Big-Guan) 创建。
+> ResonZone 版本保留完整上游历史，并新增摄像头手势、可拖动预览、对话驾驶舱、
+> 扩展设置与视觉自定义功能。
+
 > 当前状态：已在 macOS 26 Apple Silicon 实机验证唤醒、实时转写、语音回复和
 > Codex 任务执行。Realtime conversation 仍是实验性的 Codex app-server 能力，
 > 上游协议升级时可能需要同步适配。
 
 ## 主要能力
 
-- 使用本机语音识别唤醒词：嗨/嘿 Jarvis、Hi/Hey Jarvis、嗨/嘿贾维斯
+- 使用本机语音识别默认或自定义 Jarvis 唤醒词
 - Tauri 2 + Rust + TypeScript 透明无边框桌面界面
 - 通过 app-server V3 WebRTC 直接连接 Codex Voice
 - 语音、文字、工具事件和任务执行共用同一个 Codex 线程
 - 按规范化后的工作目录持久化并续接不同线程
 - 支持自然轮流说话、回复中打断、连续追问和 STOP
+- 提供 19 种可选实时音色（alloy、cove、echo、shimmer、verse 等）
+- 音频驱动的口型同步与粒子场，实时响应说话音量
+- 支持九种单手与双手动作，控制停止/拒绝、授权、语音、面板、设置和旋转
+- 摄像头预览只显示实时画面，可自由拖动并记忆位置
+- 内置手势说明、对话驾驶舱、任务仪表盘和 DIY 工作台
+- 允许通过文字或 Voice 自然语言直接控制全部可编辑设置
 - 提供安全、自动办公和完全访问三档权限
-- 登录时后台启动，冷启动或暖启动唤醒后升起窗口
+- 可在设置中选择登录时后台启动，唤醒后升起窗口
 - Voice 临时不可用时可以使用文字输入
 
 Jarvis 不模拟点击 Codex 或 ChatGPT 窗口，不绑定全局热键，也不创建第二套
 GPT-Live 会话。它复用本机 Codex 的登录状态和 app-server runtime。
+
+## 最新功能展示
+
+### 手势控制 v2
+
+![Jarvis Codex 九项单手与双手手势说明](docs/images/jarvis-gesture-v2.png)
+
+支持七项单手动作与两项双手快捷动作。全局释放锁会要求手势先回到自然状态，再接受
+下一条动作，从而减少握拳、张掌和点赞之间切换时的误触。
+
+### 贾维斯控制全部设置
+
+![Jarvis Codex 自然语言设置控制与三档权限](docs/images/jarvis-settings-control.png)
+
+可以直接说或输入“打开摄像头”“音色设为 Cove”“权限改为安全模式”“主题切换为矩阵”
+等指令。摄像头仍需要 macOS 授权，完全访问仍强制二次确认。
+
+### DIY 视觉工作台
+
+![Jarvis Codex DIY 视觉工作台](docs/images/jarvis-diy-studio.png)
+
+支持系统代号、副标题、五套能源主题、三种 HUD 布局、能量强度、角色比例和界面模块
+的实时预览与本机持久化。
 
 ## 视觉演进
 
@@ -63,6 +100,49 @@ GPT-Live 会话。它复用本机 Codex 的登录状态和 app-server runtime。
 
 视觉层只消费已有的音频、转写和任务事件，不替换唤醒监听、WebRTC 连接、工作目录
 线程续接、权限模式或任务中断逻辑。
+
+### ResonZone 更新：手势控制与驾驶舱
+
+当前分支增加了可离线运行的 MediaPipe 手势识别，支持 GPU 失败后自动切换 CPU；
+手势 v2 同时识别两只手，并使用全局释放锁，姿势切换过程不会误触第二条指令。
+摄像头预览可以拖动，手势说明被移到设置面板，不再覆盖实时画面。
+
+## 摄像头手势
+
+将手完整放入摄像头画面：单手动作保持约 0.3 秒，双手组合保持约 0.4 秒。每次触发
+后让手回到自然状态，再做下一个手势。
+
+| 手势 | 动作 |
+| --- | --- |
+| 拇指向下 | STOP；有授权弹窗时拒绝操作 |
+| 张开手掌 | 打开或关闭任务仪表盘 |
+| 握紧拳头 | 确认；有授权弹窗时允许一次 |
+| 拇指向上 | 批准或完成 |
+| V 字胜利手势 | 打开或关闭对话驾驶舱 |
+| “我爱你”手势 | 让 Jarvis 进行 360° 旋转 |
+| 食指向上 | 开始或结束语音对话 |
+| 双手同时张开 | 打开或关闭系统设置 |
+| 双手同时握拳 | 打开或关闭 DIY 工作台 |
+
+可以在应用内打开**设置 → 手势控制 → 查看手势**查看同样的说明。摄像头小窗只显示
+实时画面，可以将它拖到 Jarvis 窗口内的任意位置。
+
+## 自然语言控制设置
+
+文字输入和 Voice 语音都可以直接修改全部可编辑设置。打开设置后，在“贾维斯控制”
+卡片中也可以查看示例。
+
+| 范围 | 示例指令 |
+| --- | --- |
+| 摄像头与启动 | “打开摄像头”“关闭后台启动” |
+| 语言、音色、唤醒词 | “切换为英文”“音色设为 Cove”“唤醒词改为星期五” |
+| 工作目录与权限 | “工作目录设为 /Users/me/project”“权限改为安全模式” |
+| DIY 外观 | “主题切换为矩阵”“布局改为指挥中心”“能量强度设为 88” |
+| 角色与 HUD | “角色比例设为 110”“隐藏协作面板”“系统代号改为 Friday” |
+| 查询与导航 | “显示所有设置”“设置帮助”“打开 DIY 工作台” |
+
+摄像头仍需 macOS 系统授权；开启“完全访问”时仍会弹出确认，避免语音误触扩大权限。
+在 Voice 会话中修改唤醒词时，新唤醒词会保存，并在当前会话结束、麦克风释放后启用。
 
 ## 工作原理
 
@@ -87,7 +167,8 @@ Swift 唤醒 helper 与 Voice 会话不会同时采集麦克风。运行时、�
 
 1. 在 Mac 上安装并登录 Codex App、ChatGPT App 或 Codex CLI。
 2. 下载最新 DMG，把 `Jarvis Codex` 拖入“应用程序”。
-3. 首次启动时允许麦克风和语音识别权限。
+3. 首次启动时允许麦克风和语音识别权限。摄像头权限是可选的，只会在启用手势控制
+   时请求。
 4. 打开设置，选择希望 Codex 工作的项目目录。
 5. 关闭窗口，让 Jarvis 留在后台监听。
 6. 对电脑说“嗨 Jarvis”，窗口升起后直接说出任务。
@@ -114,6 +195,7 @@ Voice 暂时不可用时，可以使用底部文字输入框。语音和文字�
 - 当前发布的 DMG 面向 Apple Silicon
 - 已安装并登录 Codex App、ChatGPT App 或 Codex CLI
 - 麦克风和语音识别权限
+- 启用手势控制时需要摄像头权限
 
 源码开发：
 
@@ -149,6 +231,23 @@ npm run build
 如果修改了唤醒、麦克风、Voice、STOP、线程续接、权限或打包逻辑，还需要在真实
 macOS 环境执行 smoke test。现有自动化测试会检查重要协议与生命周期约束，但不能
 证明实验性 realtime 服务和 macOS 隐私授权端到端正常。
+
+仓库还包含 Playwright 交互测试，用于验证手势说明、纯画面预览、拖动边界和位置
+记忆：
+
+```bash
+python3 /path/to/webapp-testing/scripts/with_server.py \
+  --server "npm run web:dev -- --host 127.0.0.1" --port 1420 \
+  python3 tests/gesture-hud-ui.py
+```
+
+界面功能更新后，可以用可复现脚本重新生成 README 截图：
+
+```bash
+python3 /path/to/webapp-testing/scripts/with_server.py \
+  --server "npm run web:dev -- --host 127.0.0.1" --port 1420 \
+  python3 scripts/capture-readme-images.py
+```
 
 ## 构建
 
@@ -186,8 +285,15 @@ Application 证书并完成 notarization，不应把 ad-hoc 构建描述为生�
 
 Jarvis × Codex 使用 [GNU General Public License v3.0](LICENSE) 开源。
 
+## 原作者与贡献者
+
+- **原作者及上游维护者：**[Leo Zhang（@Big-Guan）](https://github.com/Big-Guan)
+- **当前分支维护及新增功能：**[Ruiyangz（@ResonZone）](https://github.com/ResonZone)
+
+本分支保留上游 Git 提交历史、原作者署名及 GPLv3 许可证。上游项目和完整贡献记录
+请查看[原始仓库](https://github.com/Big-Guan/jarvis-codex)。
+
 ## 参与贡献
 
-欢迎参与项目贡献。`main` 分支受到保护，不接受直接推送。贡献者需要先 Fork 仓库，
-在自己的 Fork 中创建分支，然后提交 Pull Request。开始开发前请阅读
-[CONTRIBUTING.md](CONTRIBUTING.md)。
+欢迎参与项目贡献。请创建职责明确的分支，并向当前维护分支提交 Pull Request。
+开始开发前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。

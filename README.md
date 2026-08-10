@@ -13,13 +13,15 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Big-Guan/jarvis-codex/releases/latest">Download the latest DMG</a>
+  <a href="https://github.com/ResonZone/jarvis-codex">ResonZone repository</a>
+  ·
+  <a href="https://github.com/Big-Guan/jarvis-codex">Original project</a>
   ·
   <a href="CONTRIBUTING.md">Contribute</a>
 </p>
 
 <p align="center">
-  <img src="public/assets/jarvis-character-v2.png" width="520" alt="Jarvis Codex transparent avatar">
+  <img src="docs/images/jarvis-main-v2.png" width="960" alt="Latest Jarvis Codex interface with task dashboard">
 </p>
 
 Jarvis × Codex is a local voice workspace for macOS. Say the wake phrase and a
@@ -28,6 +30,13 @@ Codex thread through the Codex app-server WebRTC interface. You can speak
 naturally, interrupt a response, continue the conversation, and ask Codex to
 perform real work in the selected project.
 
+> **Maintained fork notice (updated August 10, 2026):** this repository is a
+> modified fork of [Big-Guan/jarvis-codex](https://github.com/Big-Guan/jarvis-codex),
+> originally created by [Leo Zhang (@Big-Guan)](https://github.com/Big-Guan).
+> The ResonZone edition preserves the upstream history and adds gesture control,
+> camera-preview improvements, a conversation cockpit, expanded settings, and
+> visual customization.
+
 > Current status: wake, live transcription, voice responses, and Codex task
 > execution have been verified on Apple Silicon running macOS 26. Realtime
 > conversation is still an experimental Codex app-server capability, so
@@ -35,19 +44,50 @@ perform real work in the selected project.
 
 ## What it does
 
-- Recognizes “Hi/Hey Jarvis” and Chinese Jarvis wake phrases on-device
+- Recognizes default or custom Jarvis wake phrases on-device
 - Opens a transparent, borderless Tauri 2 desktop interface
 - Connects directly to Codex Voice through app-server V3 WebRTC
 - Keeps voice, text, tool activity, and task execution in the same Codex thread
 - Stores one persistent thread per canonical workspace path
 - Supports natural turn-taking, interruption, follow-up questions, and STOP
+- Offers 19 selectable realtime voices (alloy, cove, echo, shimmer, verse, etc.)
+- Audio-reactive lip-sync and particle field driven by real-time audio levels
+- Recognizes nine single- and two-hand actions for STOP/deny, approval, Voice, panels, settings, and spin
+- Shows a video-only camera preview that can be dragged and remembers its position
+- Includes an in-app gesture guide, conversation cockpit, task dashboard, and DIY studio
+- Lets text input or Voice control every editable setting with natural language
 - Offers safe, automatic workspace, and full-access permission profiles
-- Runs in the background at login and raises the window on warm or cold wake
+- Can optionally start in the background at login and raise the window on wake
 - Falls back to text input when Voice is temporarily unavailable
 
 Jarvis does not simulate clicks in the Codex or ChatGPT applications, register
 a global hotkey, or create a separate GPT-Live session. It reuses the local
 Codex authentication and app-server runtime.
+
+## Latest feature showcase
+
+### Gesture control v2
+
+![Nine single- and two-hand Jarvis controls](docs/images/jarvis-gesture-v2.png)
+
+Seven single-hand actions and two two-hand shortcuts cover the main control
+surface. A global release lock requires a neutral pose before accepting the
+next action, reducing transition misfires between fists, palms, and thumbs up.
+
+### Jarvis controls every setting
+
+![Natural-language settings control and permission profiles](docs/images/jarvis-settings-control.png)
+
+Speak or type commands such as “enable camera,” “set voice to Cove,” “use safe
+permission mode,” or “set theme to Matrix.” Camera access still requires macOS
+authorization, and Full Access still requires an explicit confirmation.
+
+### DIY visual studio
+
+![Jarvis Codex DIY visual studio](docs/images/jarvis-diy-studio.png)
+
+Customize the callsign, subtitle, five energy themes, three HUD layouts, effect
+intensity, avatar scale, and visible modules with live preview and local persistence.
 
 ## Visual evolution
 
@@ -69,6 +109,53 @@ effects.
 The visual layer consumes the existing audio, transcript, and task events. It
 does not replace the wake listener, WebRTC connection, workspace thread
 resumption, permission profiles, or interruption logic.
+
+### ResonZone update — gesture control and cockpit
+
+The current fork adds an offline MediaPipe gesture recognizer with GPU-to-CPU
+fallback. Gesture v2 recognizes up to two hands and uses a global release lock,
+so transitions between poses cannot accidentally fire a second command. The
+draggable camera preview remains video-only; its guide lives in Settings.
+
+## Camera gestures
+
+Keep your hand in view for about 0.3 seconds for a single-hand action, or 0.4
+seconds for a two-hand shortcut. Return to a neutral pose before the next action.
+
+| Gesture | Action |
+| --- | --- |
+| Thumbs down | STOP; deny when an approval prompt is open |
+| Open palm | Toggle the task dashboard |
+| Closed fist | Confirm; approve once when a prompt is open |
+| Thumbs up | Approve or complete |
+| Victory / V sign | Toggle the conversation cockpit |
+| I-love-you sign | Rotate Jarvis 360° |
+| Point one finger up | Start or stop Voice conversation |
+| Two open palms | Toggle system Settings |
+| Two closed fists | Toggle DIY Studio |
+
+Open **Settings → Gesture Control → View gestures** to see the same guide in
+the app. The camera preview displays only the live video; drag it to place it
+anywhere inside the Jarvis window.
+
+## Natural-language settings control
+
+Both text input and Voice can change every editable setting. The **Jarvis
+Control** card in Settings includes examples.
+
+| Area | Example commands |
+| --- | --- |
+| Camera and startup | “Enable camera”, “Disable launch at login” |
+| Language, voice, wake phrase | “Switch to English”, “Set voice to Cove”, “Set wake phrase to Friday” |
+| Workspace and permissions | “Set workspace to /Users/me/project”, “Use safe permission mode” |
+| DIY appearance | “Set theme to Matrix”, “Use command layout”, “Set intensity to 88” |
+| Character and HUD | “Set avatar scale to 110”, “Hide workers”, “Set callsign to Friday” |
+| Status and navigation | “Show all settings”, “Settings help”, “Open DIY Studio” |
+
+Camera access still requires macOS authorization. Full Access always requires a
+confirmation so a misheard command cannot silently expand permissions. If the
+wake phrase changes during Voice, it is saved immediately and activated after
+the current session releases the microphone.
 
 ## How it works
 
@@ -94,7 +181,8 @@ trust boundaries.
 
 1. Install and sign in to Codex App, ChatGPT App, or Codex CLI on your Mac.
 2. Download the latest DMG and drag `Jarvis Codex` into Applications.
-3. Allow microphone and speech-recognition access on first launch.
+3. Allow microphone and speech-recognition access on first launch. Camera
+   permission is optional and is requested only when gesture control is enabled.
 4. Open Settings and select the project directory Codex should work in.
 5. Close the window to leave Jarvis listening in the background.
 6. Say “Hey Jarvis,” then speak your task when the window appears.
@@ -123,6 +211,7 @@ For regular use:
 - Apple Silicon for the currently published DMG
 - Codex App, ChatGPT App, or Codex CLI installed and signed in
 - Microphone and speech-recognition permission
+- Camera permission when gesture control is enabled
 
 For source development:
 
@@ -159,6 +248,24 @@ Changes to wake, microphone, Voice, STOP, thread resumption, permissions, or
 packaging also require a real macOS smoke test. The current automated tests
 verify important protocol and lifecycle invariants, but cannot prove that the
 experimental realtime service or macOS privacy prompts work end to end.
+
+The repository also contains a Playwright interaction test for the gesture
+guide, video-only preview, drag boundaries, and saved preview position:
+
+```bash
+python3 /path/to/webapp-testing/scripts/with_server.py \
+  --server "npm run web:dev -- --host 127.0.0.1" --port 1420 \
+  python3 tests/gesture-hud-ui.py
+```
+
+After an interface update, regenerate the README screenshots with the
+reproducible capture script:
+
+```bash
+python3 /path/to/webapp-testing/scripts/with_server.py \
+  --server "npm run web:dev -- --host 127.0.0.1" --port 1420 \
+  python3 scripts/capture-readme-images.py
+```
 
 ## Build
 
@@ -200,9 +307,16 @@ public issue.
 
 Jarvis × Codex is released under the [GNU General Public License v3.0](LICENSE).
 
+## Credits and attribution
+
+- **Original author and upstream maintainer:** [Leo Zhang (@Big-Guan)](https://github.com/Big-Guan)
+- **Current fork maintenance and new features:** [Ruiyangz (@ResonZone)](https://github.com/ResonZone)
+
+This fork retains the upstream Git history, original authorship, and GPLv3
+license. See the [original repository](https://github.com/Big-Guan/jarvis-codex)
+for the upstream project and its contributors.
+
 ## Contributing
 
-Contributions are welcome. The `main` branch is protected and does not accept
-direct pushes. Contributors must fork the repository, create a branch in their
-fork, and open a pull request. Read [CONTRIBUTING.md](CONTRIBUTING.md) before
-starting work.
+Contributions are welcome. Create a focused branch and open a pull request
+against this fork. Read [CONTRIBUTING.md](CONTRIBUTING.md) before starting work.

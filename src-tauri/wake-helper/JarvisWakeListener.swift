@@ -11,8 +11,11 @@ final class WakeListener {
     private var hasWoken = false
     private let eventFile: URL?
     private let hostApp: URL?
+    private let stopFile: URL?
+    private let phrases: [String]
+    private var lifecycleTimer: Timer?
 
-    private let phrases = [
+    private static let defaultPhrases = [
         "嗨jarvis",
         "嘿jarvis",
         "hijarvis",
@@ -22,25 +25,15 @@ final class WakeListener {
     ]
 
     init() {
-        if
-            let index = CommandLine.arguments.firstIndex(of: "--event-file"),
-            CommandLine.arguments.indices.contains(index + 1)
-        {
-            eventFile = URL(fileURLWithPath: CommandLine.arguments[index + 1])
-        } else {
-            eventFile = nil
-        }
-        if
-            let index = CommandLine.arguments.firstIndex(of: "--host-app"),
-            CommandLine.arguments.indices.contains(index + 1)
-        {
-            hostApp = URL(fileURLWithPath: CommandLine.arguments[index + 1])
-        } else {
-            hostApp = nil
-        }
+        eventFile = Self.argumentValue("--event-file").map(URL.init(fileURLWithPath:))
+        hostApp = Self.argumentValue("--host-app").map(URL.init(fileURLWithPath:))
+        stopFile = Self.argumentValue("--stop-file").map(URL.init(fileURLWithPath:))
+        let configuredPhrase = Self.argumentValue("--wake-phrase").map(Self.normalize)
+        phrases = configuredPhrase.flatMap { $0.isEmpty ? nil : [$0] } ?? Self.defaultPhrases
     }
 
     func run() {
+        startLifecycleMonitor()
         emit(["type": "boot"])
         if CommandLine.arguments.contains("--test-wake") {
             emit(["type": "wake", "phrase": "automated cold-launch test"])
@@ -123,7 +116,7 @@ final class WakeListener {
         task = recognizer?.recognitionTask(with: request) { [weak self] result, error in
             guard let self, !self.hasWoken else { return }
             if let result {
-                let spoken = self.normalize(result.bestTranscription.formattedString)
+                let spoken = Self.normalize(result.bestTranscription.formattedString)
                 if self.phrases.contains(where: spoken.contains) {
                     self.hasWoken = true
                     self.emit([
@@ -147,6 +140,8 @@ final class WakeListener {
     }
 
     private func stop() {
+        lifecycleTimer?.invalidate()
+        lifecycleTimer = nil
         if audioEngine.isRunning {
             audioEngine.stop()
         }
@@ -173,7 +168,28 @@ final class WakeListener {
         }
     }
 
-    private func normalize(_ value: String) -> String {
+    private func startLifecycleMonitor() {
+        lifecycleTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let stopRequested = self.stopFile.map {
+                FileManager.default.fileExists(atPath: $0.path)
+            } ?? false
+            if stopRequested {
+                self.stop()
+                exit(0)
+            }
+        }
+    }
+
+    private static func argumentValue(_ flag: String) -> String? {
+        guard
+            let index = CommandLine.arguments.firstIndex(of: flag),
+            CommandLine.arguments.indices.contains(index + 1)
+        else { return nil }
+        return CommandLine.arguments[index + 1]
+    }
+
+    private static func normalize(_ value: String) -> String {
         value
             .lowercased()
             .replacingOccurrences(of: " ", with: "")

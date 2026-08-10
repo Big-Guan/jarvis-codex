@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const frontend = await readFile(new URL("../src/main.ts", import.meta.url), "utf8");
+const stylesheet = await readFile(new URL("../src/style.css", import.meta.url), "utf8");
 const backend = await readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
 const wakeHelper = await readFile(
   new URL("../src-tauri/wake-helper/JarvisWakeListener.swift", import.meta.url),
@@ -15,6 +16,23 @@ const entitlements = await readFile(
 const helperEntitlements = await readFile(
   new URL("../src-tauri/wake-helper/Entitlements.plist", import.meta.url),
   "utf8",
+);
+const capability = JSON.parse(
+  await readFile(new URL("../src-tauri/capabilities/default.json", import.meta.url), "utf8"),
+);
+const gestureController = await readFile(
+  new URL("../src/gesture-camera.ts", import.meta.url),
+  "utf8",
+);
+const gestureEngine = await readFile(
+  new URL("../src/gesture-engine.js", import.meta.url),
+  "utf8",
+);
+const tauriConfig = JSON.parse(
+  await readFile(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"),
+);
+const gestureModel = await readFile(
+  new URL("../public/gesture_recognizer.task", import.meta.url),
 );
 
 test("Voice uses Codex app-server V3 WebRTC directly", () => {
@@ -44,6 +62,11 @@ test("wake phrase opens the same direct Voice path", () => {
   assert.match(backend, /tauri_plugin_autostart/);
   assert.match(frontend, /onCloseRequested/);
   assert.match(wakeHelper, /"--test-wake"/);
+  assert.match(frontend, /wakePhrase:\s*storedWakePhrase\(\)/);
+  assert.match(backend, /validated_wake_phrase/);
+  assert.match(backend, /"--wake-phrase"/);
+  assert.match(wakeHelper, /argumentValue\("--wake-phrase"\)/);
+  assert.doesNotMatch(backend, /\/usr\/bin\/pkill/);
 });
 
 test("STOP suppresses transcript-tail handoffs and interrupts late turns", () => {
@@ -91,4 +114,117 @@ test("wake activates the macOS app before focusing the Jarvis window", () => {
   assert.match(backend, /set_always_on_top\(true\)/);
   assert.match(backend, /set_always_on_top\(false\)/);
   assert.match(backend, /raise_jarvis_window\(&app\)/);
+});
+
+test("settings dialog keeps a unique interactive overlay contract", () => {
+  const template = frontend.match(/document\.querySelector<HTMLDivElement>\("#app"\)!\.innerHTML = `([\s\S]*?)`;\s*\n\s*const \$/)?.[1];
+  assert.ok(template, "app template should be discoverable");
+
+  const ids = [...template.matchAll(/\sid="([^"]+)"/g)].map((match) => match[1]);
+  const duplicates = [...new Set(ids.filter((id, index) => ids.indexOf(id) !== index))];
+  assert.deepEqual(duplicates, [], `duplicate DOM ids: ${duplicates.join(", ")}`);
+
+  for (const id of ["settings-dialog", "cockpit", "wake-auth", "thread-id", "workspace", "permission-mode-label", "voice-auth"]) {
+    assert.ok(ids.includes(id), `missing required settings/runtime node #${id}`);
+  }
+  assert.equal(ids.filter((id) => id === "cockpit").length, 1);
+  assert.doesNotMatch(template, /id="cockpit"[^>]*>\s*<div id="dashboard"/);
+  assert.match(stylesheet, /dialog:modal\{[^}]*pointer-events:auto/);
+});
+
+test("Tauri capabilities cover every privileged frontend interaction", () => {
+  assert.ok(capability.permissions.includes("core:window:allow-hide"));
+  assert.ok(capability.permissions.includes("core:window:allow-start-dragging"));
+  assert.ok(capability.permissions.includes("dialog:allow-open"));
+});
+
+test("settings preview, defaults, and autostart remain transactional", () => {
+  assert.match(frontend, /applyLanguage\(lang, false\)/);
+  assert.match(frontend, /applyLanguage\(settingsLanguageSnapshot, false\)/);
+  assert.match(frontend, /enteredWakePhrase[\s\S]*\? enteredWakePhrase[\s\S]*: null/);
+  assert.match(frontend, /localStorage\.removeItem\(WAKE_PHRASE_KEY\)/);
+  assert.match(frontend, /invoke\("set_autostart", \{ enabled: nextAutostart \}\)/);
+  assert.match(backend, /fn set_autostart/);
+  assert.equal([...backend.matchAll(/app\.autolaunch\(\)\.enable\(\)/g)].length, 1);
+});
+
+test("text and Voice can safely control every settings surface", () => {
+  assert.match(frontend, /parseSettingsCommand/);
+  assert.match(frontend, /await handleSettingsCommandText\(text, "text"\)/);
+  assert.match(frontend, /await handleSettingsCommandText\(text, "voice"\)/);
+  assert.match(frontend, /async function executeSettingsCommand/);
+  assert.match(frontend, /case "set-autostart":/);
+  assert.match(frontend, /invoke\("set_autostart", \{ enabled: command\.enabled \}\)/);
+  assert.match(frontend, /case "set-gesture":/);
+  assert.match(frontend, /await setGestureControlEnabled\(command\.enabled\)/);
+  assert.match(frontend, /case "set-permission":/);
+  assert.match(frontend, /await applyPermissionMode\(command\.mode\)/);
+  assert.match(frontend, /window\.confirm\(\$t\("fullAccessConfirm"\)\)/);
+  assert.match(frontend, /case "set-theme":/);
+  assert.match(frontend, /case "set-module":/);
+  assert.match(frontend, /id="settings-command-copy"/);
+  assert.match(frontend, /function canArmWakeListenerNow/);
+  assert.match(frontend, /if \(!settingsDirty\) syncAllSettingsControls\(\)/);
+});
+
+test("approval and media resources have bounded lifecycles", () => {
+  assert.match(frontend, /const approvalQueue: ApprovalRequest\[\]/);
+  assert.match(frontend, /async function resolveActiveApproval/);
+  assert.doesNotMatch(frontend, /let approvalId/);
+  assert.match(frontend, /document\.addEventListener\("visibilitychange"/);
+  assert.match(frontend, /async function prepareForBackground/);
+  assert.match(gestureController, /this\.recognizer\?\.close\(\)/);
+});
+
+test("camera opens before gesture model initialization and falls back to CPU", () => {
+  const cameraOpen = gestureController.indexOf("this.stream = await navigator.mediaDevices.getUserMedia");
+  const modelInit = gestureController.indexOf("FilesetResolver.forVisionTasks");
+  assert.ok(cameraOpen >= 0 && modelInit >= 0 && cameraOpen < modelInit);
+  assert.match(gestureController, /WASM_ROOT = "\/wasm"/);
+  assert.match(gestureController, /MODEL_PATH = "\/gesture_recognizer\.task"/);
+  assert.match(gestureController, /await fetch\(MODEL_PATH\)/);
+  assert.match(gestureController, /modelAssetBuffer: modelAssetBuffer\.slice\(\)/);
+  assert.match(gestureController, /delegate: "GPU"/);
+  assert.match(gestureController, /delegate: "CPU"/);
+  assert.match(tauriConfig.app.security.csp, /connect-src 'self' blob:/);
+  assert.match(frontend, /jarvis\.camera\.lastError/);
+  assert.match(frontend, /button\.disabled = true/);
+  assert.match(frontend, /button\.disabled = false/);
+});
+
+test("bundled gesture model is a complete MediaPipe task archive", () => {
+  assert.ok(gestureModel.length > 8_000_000, `gesture model is unexpectedly small: ${gestureModel.length}`);
+  assert.ok(gestureModel.lastIndexOf(Buffer.from("PK\x05\x06", "binary")) > 0, "gesture model has no ZIP directory");
+});
+
+test("gesture v2 covers all controls, two-hand shortcuts, and draggable camera preview", () => {
+  assert.match(gestureEngine, /Thumb_Down:\s*\{[\s\S]*?action:\s*"stop"/);
+  assert.match(gestureEngine, /Open_Palm:\s*\{[\s\S]*?action:\s*"dashboard"/);
+  assert.match(gestureEngine, /ILoveYou:\s*\{[\s\S]*?action:\s*"spin"/);
+  assert.match(gestureEngine, /"Open_Palm\+Open_Palm":\s*\{[\s\S]*?action:\s*"settings"/);
+  assert.match(gestureEngine, /"Closed_Fist\+Closed_Fist":\s*\{[\s\S]*?action:\s*"studio"/);
+  assert.match(gestureEngine, /class GestureLatch/);
+  assert.match(gestureEngine, /conflicting multi-hand pose is not a release/);
+  assert.match(gestureController, /numHands:\s*2/);
+  assert.match(frontend, /case "spin":\s*spinCharacter\(\)/);
+  assert.match(frontend, /case "cockpit":\s*toggleCockpit\(\)/);
+  assert.match(frontend, /case "dashboard":\s*toggleDashboard\(\)/);
+  assert.match(frontend, /case "settings":/);
+  assert.match(frontend, /case "studio":/);
+  assert.match(frontend, /GESTURE_HUD_POSITION_KEY = "jarvis\.gestureHudPosition\.v1"/);
+  assert.match(frontend, /gestureHud\.addEventListener\("pointerdown"/);
+  assert.match(frontend, /gestureHud\.addEventListener\("pointermove"/);
+  assert.match(frontend, /id="gesture-help"[^>]*>查看手势<\/button>/);
+  assert.match(frontend, /id="gesture-guide-dialog"/);
+  const hudStart = frontend.indexOf('<div id="gesture-hud"');
+  const hudEnd = frontend.indexOf('<div id="dashboard"', hudStart);
+  const hudMarkup = frontend.slice(hudStart, hudEnd);
+  assert.match(hudMarkup, /<video id="gesture-video"/);
+  assert.doesNotMatch(hudMarkup, /gesture-info|gesture-hint|手势识别中/);
+  const guideStart = frontend.indexOf('<dialog id="gesture-guide-dialog"');
+  const guideEnd = frontend.indexOf('<dialog id="studio-dialog"', guideStart);
+  assert.equal((frontend.slice(guideStart, guideEnd).match(/class="gesture-guide-card"/g) ?? []).length, 9);
+  assert.match(stylesheet, /\.gesture-hud\.dragging\{[^}]*cursor:grabbing/);
+  assert.match(stylesheet, /\.gesture-toggle-line\{[^}]*display:flex/);
+  assert.match(stylesheet, /@keyframes character-spin\{[^}]*rotateY\(0\)[\s\S]*rotateY\(360deg\)/);
 });

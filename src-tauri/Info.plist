@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>NSCameraUsageDescription</key>
-	<string>Jarvis does not capture video; this declaration allows WebKit to initialize its WebRTC media permission path.</string>
+	<string>Jarvis 使用摄像头在本机识别隔空手势（张开手掌停止、握拳确认等），画面仅在本机实时处理，不会录制、保存或上传。</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Jarvis locally listens for the wake phrase “Hi Jarvis”; official Codex Voice handles the conversation.</string>
   <key>NSSpeechRecognitionUsageDescription</key>

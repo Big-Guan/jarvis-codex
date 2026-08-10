@@ -17,6 +17,7 @@ cp "$helper_dir/Info.plist" "$app_dir/Contents/Info.plist"
   -framework Speech \
   "$helper_dir/JarvisWakeListener.swift" \
   -o "$binary_dir/JarvisWakeListener"
+xattr -cr "$app_dir" 2>/dev/null || true
 /usr/bin/codesign \
   --force \
   --options runtime \
