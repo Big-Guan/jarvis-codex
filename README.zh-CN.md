@@ -191,3 +191,8 @@ Jarvis × Codex 使用 [GNU General Public License v3.0](LICENSE) 开源。
 欢迎参与项目贡献。`main` 分支受到保护，不接受直接推送。贡献者需要先 Fork 仓库，
 在自己的 Fork 中创建分支，然后提交 Pull Request。开始开发前请阅读
 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
+## 本地运行时兼容性
+
+Jarvis 会识别新版 Codex/ChatGPT 桌面 CLI 路径，并在连接语音前检查 Voice v3
+兼容性。启动应用不会自动启用开机自启。详见[运行时说明](docs/CODEX_RUNTIME.zh-CN.md)。
