@@ -206,3 +206,9 @@ Contributions are welcome. The `main` branch is protected and does not accept
 direct pushes. Contributors must fork the repository, create a branch in their
 fork, and open a pull request. Read [CONTRIBUTING.md](CONTRIBUTING.md) before
 starting work.
+
+## Codex runtime compatibility
+
+Jarvis discovers current Codex/ChatGPT desktop CLI layouts and checks Voice v3
+compatibility before connecting. Launching the app does not automatically
+enable login startup. See [runtime details](docs/CODEX_RUNTIME.md).

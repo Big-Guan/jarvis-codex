@@ -29,7 +29,7 @@ input share this runtime.
 
 ## Process lifecycle
 
-- Login start launches the app with `--background`.
+- Login start, when explicitly enabled by the user, launches the app with `--background`. The app does not enable login start during setup.
 - Closing the window hides it; it does not terminate the listener.
 - A cold wake launches the app with `--jarvis-wake`.
 - Warm wake raises the existing window and starts Voice.

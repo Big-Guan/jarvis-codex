@@ -1,3 +1,5 @@
+mod codex_binary;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -89,6 +91,7 @@ struct CodexRuntime {
     voice_active: AtomicBool,
     voice_phase: RwLock<String>,
     realtime_session_id: RwLock<Option<String>>,
+    voice_error: Option<String>,
     permission_mode: PermissionMode,
     workspace: String,
 }
@@ -191,8 +194,10 @@ impl CodexRuntime {
         permission_mode: PermissionMode,
         workspace: String,
     ) -> Result<Arc<Self>, String> {
-        let codex_binary = codex_binary_path(&app)?;
-        let mut child = Command::new(&codex_binary)
+        let codex_binary =
+            codex_binary::resolve(app.path().resource_dir().ok(), &["JARVIS_CODEX_BIN"]).await?;
+        eprintln!("Codex runtime: {}", codex_binary.path.display());
+        let mut child = Command::new(&codex_binary.path)
             // Realtime is an experimental app-server surface. Enable it only
             // for this isolated Jarvis child; never mutate ~/.codex/config.toml.
             .args(["app-server", "--enable", "realtime_conversation", "--stdio"])
@@ -215,6 +220,9 @@ impl CodexRuntime {
             voice_active: AtomicBool::new(false),
             voice_phase: RwLock::new("standby".to_owned()),
             realtime_session_id: RwLock::new(None),
+            voice_error: codex_binary
+                .voice_error
+                .map(|error| format!("{}：{error}", codex_binary.path.display())),
             permission_mode,
             workspace,
         });
@@ -338,37 +346,6 @@ impl CodexRuntime {
             .clone()
             .ok_or("Jarvis 尚未连接 Codex 线程".to_owned())
     }
-}
-
-fn codex_binary_path(app: &AppHandle) -> Result<PathBuf, String> {
-    if let Ok(configured) = std::env::var("JARVIS_CODEX_BIN") {
-        let path = PathBuf::from(configured);
-        if path.is_file() {
-            return Ok(path);
-        }
-    }
-    if let Ok(resource_dir) = app.path().resource_dir() {
-        let bundled = resource_dir.join("codex");
-        if bundled.is_file() {
-            return Ok(bundled);
-        }
-    }
-    let mut candidates = vec![
-        PathBuf::from("/Applications/ChatGPT.app/Contents/Resources/codex"),
-        PathBuf::from("/Applications/Codex.app/Contents/Resources/codex"),
-        PathBuf::from("/opt/homebrew/bin/codex"),
-        PathBuf::from("/usr/local/bin/codex"),
-    ];
-    if let Ok(home) = std::env::var("HOME") {
-        candidates.push(PathBuf::from(&home).join(".local/bin/codex"));
-        candidates.push(PathBuf::from(home).join(".cargo/bin/codex"));
-    }
-    candidates
-        .into_iter()
-        .find(|path| path.is_file())
-        .ok_or_else(|| {
-            "未找到 Codex 可执行文件；请安装 Codex，或设置 JARVIS_CODEX_BIN。".to_owned()
-        })
 }
 
 async fn runtime(state: &State<'_, AppState>) -> Result<Arc<CodexRuntime>, String> {
@@ -797,6 +774,9 @@ async fn start_codex_voice(
         return Err("WebRTC SDP offer 无效".to_owned());
     }
     let runtime = ensure_runtime(app, &state, &cwd, thread_id.as_deref(), permission_mode).await?;
+    if let Some(error) = &runtime.voice_error {
+        return Err(error.clone());
+    }
     let thread_id = runtime.thread().await?;
     if runtime.voice_active.load(Ordering::SeqCst) {
         let _ = runtime
@@ -985,12 +965,12 @@ pub fn run() {
             shutdown
         ])
         .setup(move |app| {
-            use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
+            use tauri_plugin_autostart::MacosLauncher;
             app.handle().plugin(tauri_plugin_autostart::init(
                 MacosLauncher::LaunchAgent,
                 Some(vec!["--background"]),
             ))?;
-            let _ = app.autolaunch().enable();
+            // Respect the user's login-item preference; never re-enable it on launch.
             if let Some(window) = app.get_webview_window("main") {
                 if background_start {
                     let _ = window.hide();
