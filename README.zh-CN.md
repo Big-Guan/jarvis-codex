@@ -8,6 +8,7 @@
 
 <p align="center">
   <a href="README.md">English</a> · 简体中文 ·
+  <a href="https://github.com/Big-Guan/jarvis-codex/releases/tag/v0.4.7">下载 0.4.7</a> ·
   <a href="docs/USAGE.zh-CN.md">使用指南</a> ·
   <a href="CHANGELOG.md">进化历史</a>
 </p>
@@ -54,7 +55,15 @@ Jarvis × Codex 是一个 macOS 桌面语音助手。叫出唤醒词，透明机
 
 *这是 0.4.6 原生外观页截图，0.4.7 沿用这套界面。设置留在面板，桌面机甲没有悬浮工具栏。版本细节见[更新历史](CHANGELOG.md)。*
 
-## 构建与启动
+## 下载与安装
+
+[下载 Jarvis Next 0.4.7（Apple Silicon DMG）](https://github.com/Big-Guan/jarvis-codex/releases/download/v0.4.7/Jarvis-Next_0.4.7_arm64.dmg)，适用于 macOS 14+ 的 M 系列 Mac。打开 DMG，把 `Jarvis Next.app` 拖到「应用程序」。安装包已包含机甲与手势资源，无需安装 Node.js、Rust、Tripo 或 Blender；语音仍需要已登录且兼容的 Codex。
+
+**本安装包使用临时签名，尚未经过 Apple Developer ID 签名和 Apple 公证。** 首次打开可能被 macOS 拦截；确认下载来源与发布页校验值后，可按 [Apple 官方说明](https://support.apple.com/zh-cn/102445) 在「系统设置 → 隐私与安全性」为该应用选择「仍要打开」。发布页同时提供 SHA-256 校验文件。
+
+本版与旧版 Jarvis Codex 使用不同应用标识。安装后在管理面板选择自己的工作文件夹，再配置麦克风、唤醒和手势权限。
+
+## 从源码构建
 
 需要 macOS 14+、Xcode Command Line Tools、Rust stable（含 `rustfmt` / `clippy`）和 Node.js 20.19+ 或 22.12+。本机验证平台为 Apple Silicon，CI 使用 Node 22。语音还需要已登录且支持 V3 / WebRTC 的本机 Codex。
 
@@ -67,7 +76,7 @@ npm run build
 open "src-tauri/target/release/bundle/macos/Jarvis Next.app"
 ```
 
-构建后也可双击 `打开 Jarvis Next.command`。0.4.7 当前提供源码构建，默认使用本机临时签名；尚未发布该版本的 Apple 公证安装包。
+构建后也可双击 `打开 Jarvis Next.command`。本机构建默认使用临时签名；唤醒助手与桌面状态助手显式以 macOS 14 为最低目标，避免继承构建机的较新系统版本。
 
 ```sh
 npm run dev      # 原生 Tauri 应用

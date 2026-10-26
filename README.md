@@ -8,6 +8,7 @@
 
 <p align="center">
   English · <a href="README.zh-CN.md">简体中文</a> ·
+  <a href="https://github.com/Big-Guan/jarvis-codex/releases/tag/v0.4.7">Download 0.4.7</a> ·
   <a href="docs/USAGE.zh-CN.md">User guide (中文)</a> ·
   <a href="CHANGELOG.md">Evolution & changelog</a>
 </p>
@@ -54,7 +55,15 @@ A segmented model prototype introduced armor that could actually rotate, separat
 
 *Native appearance panel captured in 0.4.6 and retained in 0.4.7. Settings stay in the panel; the desktop avatar has no hover toolbar. See the [changelog](CHANGELOG.md) for the version history.*
 
-## Build and run
+## Download and install
+
+[Download Jarvis Next 0.4.7 for Apple Silicon](https://github.com/Big-Guan/jarvis-codex/releases/download/v0.4.7/Jarvis-Next_0.4.7_arm64.dmg), for M-series Macs running macOS 14+. Open the DMG and drag `Jarvis Next.app` into Applications. The installer includes the armor and gesture assets; Node.js, Rust, Tripo, and Blender are not required. Voice still needs a signed-in, compatible Codex installation.
+
+**This package is ad-hoc signed. It has no Apple Developer ID signature and has not been notarized by Apple.** macOS may block the first launch. After verifying the download source and published checksum, follow [Apple's instructions](https://support.apple.com/en-us/102445) to use **System Settings → Privacy & Security → Open Anyway** for this application. The release also includes SHA-256 checksums.
+
+Next uses a different application identifier from the original Jarvis Codex. After installation, select your own workspace in the panel, then configure microphone, wake, and gesture permissions.
+
+## Build from source
 
 Requires macOS 14+, Xcode Command Line Tools, Rust stable with `rustfmt` and `clippy`, and Node.js 20.19+ or 22.12+. Local verification was on Apple Silicon; CI uses Node 22. Voice also requires a signed-in local Codex installation with compatible V3 / WebRTC support.
 
@@ -67,7 +76,7 @@ npm run build
 open "src-tauri/target/release/bundle/macos/Jarvis Next.app"
 ```
 
-After building, you can also use `打开 Jarvis Next.command`. Version 0.4.7 is currently available as source; local builds use ad-hoc signing, and no notarized installer has been published for this version.
+After building, you can also use `打开 Jarvis Next.command`. Local builds use ad-hoc signing. The wake and desktop helpers explicitly target macOS 14 so they do not inherit a newer build machine's minimum OS version.
 
 ```sh
 npm run dev      # Native Tauri app
