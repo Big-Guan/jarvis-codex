@@ -1,6 +1,6 @@
 {
-  "name": "jarvis-codex",
-  "version": "0.2.0",
+  "name": "jarvis-next",
+  "version": "0.4.7",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,21 +8,29 @@
     "predev": "npm run wake:build",
     "dev": "tauri dev",
     "prebuild": "npm run wake:build",
-    "build": "tauri build",
+    "build": "tauri build --bundles app",
     "web:dev": "vite",
     "web:build": "tsc && vite build",
-    "test": "node --test tests/*.test.mjs",
+    "test": "tsx --test tests/*.test.ts",
     "check": "npm run wake:build && npm test && npm run web:build && cargo test --manifest-path src-tauri/Cargo.toml --lib && cargo fmt --manifest-path src-tauri/Cargo.toml --check && cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.11.1"
+    "@mediapipe/tasks-vision": "1.1.1",
+    "@tauri-apps/api": "2.11.1",
+    "@tauri-apps/plugin-dialog": "2.7.1",
+    "lucide": "1.57.0",
+    "three": "0.185.1"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.11.4",
+    "@tauri-apps/cli": "2.11.4",
+    "@types/node": "^24.0.0",
+    "@types/three": "^0.185.0",
+    "prettier": "3.8.2",
+    "tsx": "^4.21.0",
     "typescript": "^7.0.2",
     "vite": "^8.1.5"
   },
   "engines": {
-    "node": ">=20"
+    "node": "^20.19.0 || >=22.12.0"
   }
 }

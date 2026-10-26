@@ -1,11 +1,11 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Jarvis Codex",
-  "version": "0.2.0",
-  "identifier": "com.bigguan.jarvis-codex",
+  "productName": "Jarvis Next",
+  "version": "0.4.7",
+  "identifier": "com.bigguan.jarvis-next",
   "build": {
     "beforeDevCommand": "npm run web:dev",
-    "devUrl": "http://localhost:1420",
+    "devUrl": "http://127.0.0.1:4400",
     "beforeBuildCommand": "npm run web:build",
     "frontendDist": "../dist"
   },
@@ -13,25 +13,53 @@
     "macOSPrivateApi": true,
     "windows": [
       {
-        "title": "JARVIS · CODEX",
-        "width": 1440,
-        "height": 900,
+        "label": "main",
+        "title": "Jarvis Next · 管理面板",
+        "visible": false,
+        "width": 1120,
+        "height": 780,
         "minWidth": 960,
-        "minHeight": 620,
+        "minHeight": 640,
         "center": true,
+        "decorations": true,
+        "transparent": false,
+        "backgroundColor": "#101317",
+        "backgroundThrottling": "disabled"
+      },
+      {
+        "label": "avatar",
+        "title": "Jarvis Next · 机甲",
+        "url": "index.html?view=avatar",
+        "width": 1000,
+        "height": 700,
+        "visible": false,
         "decorations": false,
         "transparent": true,
         "shadow": false,
-        "resizable": true
+        "resizable": false,
+        "focus": false,
+        "focusable": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "backgroundThrottling": "disabled"
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost data:; style-src 'self' 'unsafe-inline'; media-src 'self' blob:; font-src 'self'"
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost asset: http://asset.localhost blob:; img-src 'self' asset: http://asset.localhost data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; media-src 'self' blob:; font-src 'self'; object-src 'none'",
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$APPDATA/skins/**"
+        ]
+      }
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg"],
+    "targets": [
+      "app",
+      "dmg"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -40,12 +68,13 @@
       "icons/icon.ico"
     ],
     "category": "DeveloperTool",
-    "shortDescription": "Wake Jarvis and work through Codex",
+    "shortDescription": "独立的 Jarvis 3D 机甲与管理面板",
     "resources": [
-      "wake-helper/JarvisWakeListener.app/"
+      "wake-helper/build.noindex/JarvisNextWake.app/",
+      "native-helpers/NextDesktopMonitor"
     ],
     "macOS": {
-      "minimumSystemVersion": "13.0",
+      "minimumSystemVersion": "14.0",
       "signingIdentity": "-",
       "entitlements": "Entitlements.plist",
       "infoPlist": "Info.plist"

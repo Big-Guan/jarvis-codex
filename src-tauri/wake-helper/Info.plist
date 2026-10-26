@@ -5,9 +5,9 @@
   <key>CFBundleDevelopmentRegion</key>
   <string>zh_CN</string>
   <key>CFBundleExecutable</key>
-  <string>JarvisWakeListener</string>
+  <string>JarvisNextWake</string>
   <key>CFBundleIdentifier</key>
-  <string>com.bigguan.jarvis-codex.wake-listener</string>
+  <string>com.bigguan.jarvis-next.wake-listener</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>

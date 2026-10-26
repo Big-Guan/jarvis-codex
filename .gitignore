@@ -2,7 +2,7 @@ node_modules/
 dist/
 src-tauri/target/
 src-tauri/gen/
-src-tauri/wake-helper/JarvisWakeListener.app/
+src-tauri/wake-helper/build.noindex/
 runtime/*
 !runtime/.gitkeep
 .DS_Store
@@ -11,3 +11,36 @@ runtime/*
 .env.*
 !.env.example
 *.dmg
+src-tauri/native-helpers/NextDesktopMonitor
+
+# Local app archives and machine-specific evidence stay on this computer.
+releases/
+verification/
+*.app/
+*.app.zip
+*.dSYM/
+*.tsbuildinfo
+*.pem
+*.p12
+*.pfx
+.idea/
+.vscode/
+
+# Publish the product and a small public documentation set.
+/AGENTS.md
+/CONTRIBUTING.md
+/SECURITY.md
+/.github/PULL_REQUEST_TEMPLATE.md
+/design/
+/examples/
+/docs/*
+!/docs/USAGE.zh-CN.md
+!/docs/ASSETS.md
+!/docs/images/
+/docs/images/*
+!/docs/images/jarvis-main-ui.png
+!/docs/images/nano-armor-hero.png
+!/docs/images/nano-armor-exploded.png
+!/docs/screenshots/
+/docs/screenshots/*
+!/docs/screenshots/0.4.6-presence-preview.png

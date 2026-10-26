@@ -4,7 +4,7 @@ set -euo pipefail
 script_dir=${0:A:h}
 project_dir=${script_dir:h}
 helper_dir="$project_dir/src-tauri/wake-helper"
-app_dir="$helper_dir/JarvisWakeListener.app"
+app_dir="$helper_dir/build.noindex/JarvisNextWake.app"
 binary_dir="$app_dir/Contents/MacOS"
 signing_identity=${APPLE_SIGNING_IDENTITY:--}
 
@@ -16,10 +16,15 @@ cp "$helper_dir/Info.plist" "$app_dir/Contents/Info.plist"
   -framework AVFoundation \
   -framework Speech \
   "$helper_dir/JarvisWakeListener.swift" \
-  -o "$binary_dir/JarvisWakeListener"
+  -o "$binary_dir/JarvisNextWake"
 /usr/bin/codesign \
   --force \
   --options runtime \
   --entitlements "$helper_dir/Entitlements.plist" \
   --sign "$signing_identity" \
   "$app_dir"
+
+/usr/bin/swiftc -O -framework AppKit -framework CoreGraphics \
+  "$project_dir/src-tauri/native-helpers/NextDesktopMonitor.swift" \
+  -o "$project_dir/src-tauri/native-helpers/NextDesktopMonitor"
+/usr/bin/codesign --force --sign "$signing_identity" "$project_dir/src-tauri/native-helpers/NextDesktopMonitor"

@@ -1,0 +1,6 @@
+# Keep bundled MediaPipe runtime files byte-for-byte identical to the package.
+public/mediapipe/** linguist-vendored
+public/mediapipe/wasm/*.js -whitespace
+*.glb binary
+*.wasm binary
+*.task binary

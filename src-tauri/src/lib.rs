@@ -1,4 +1,7 @@
 mod codex_binary;
+mod launch;
+mod next;
+mod voice_policy;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -159,33 +162,7 @@ struct WakeStatus {
 }
 
 fn raise_jarvis_window(app: &AppHandle) {
-    let app_handle = app.clone();
-    let _ = app.run_on_main_thread(move || {
-        #[cfg(target_os = "macos")]
-        {
-            use objc2::MainThreadMarker;
-            use objc2_app_kit::NSApplication;
-
-            if let Some(mtm) = MainThreadMarker::new() {
-                let application = NSApplication::sharedApplication(mtm);
-                #[allow(deprecated)]
-                application.activateIgnoringOtherApps(true);
-            }
-        }
-
-        if let Some(window) = app_handle.get_webview_window("main") {
-            let _ = window.show();
-            let _ = window.unminimize();
-            // A short floating interval lets macOS finish switching the
-            // active application before the window returns to normal level.
-            let _ = window.set_always_on_top(true);
-            let _ = window.set_focus();
-            tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(700)).await;
-                let _ = window.set_always_on_top(false);
-            });
-        }
-    });
+    next::show_panel(app);
 }
 
 impl CodexRuntime {
@@ -194,8 +171,11 @@ impl CodexRuntime {
         permission_mode: PermissionMode,
         workspace: String,
     ) -> Result<Arc<Self>, String> {
-        let codex_binary =
-            codex_binary::resolve(app.path().resource_dir().ok(), &["JARVIS_CODEX_BIN"]).await?;
+        let codex_binary = codex_binary::resolve(
+            app.path().resource_dir().ok(),
+            &["JARVIS_NEXT_CODEX_BIN", "JARVIS_CODEX_BIN"],
+        )
+        .await?;
         eprintln!("Codex runtime: {}", codex_binary.path.display());
         let mut child = Command::new(&codex_binary.path)
             // Realtime is an experimental app-server surface. Enable it only
@@ -388,7 +368,7 @@ async fn direct_voice_status(state: State<'_, AppState>) -> Result<DirectVoiceIn
 }
 
 fn wake_helper_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let relative = PathBuf::from("wake-helper/JarvisWakeListener.app");
+    let relative = PathBuf::from("wake-helper/build.noindex/JarvisNextWake.app");
     if let Ok(resource_dir) = app.path().resource_dir() {
         let bundled = resource_dir.join(&relative);
         if bundled.exists() {
@@ -440,7 +420,7 @@ fn start_wake_supervisor(app: AppHandle) {
         // A previous host may have exited while its LaunchServices helper
         // remained alive. Keep exactly one microphone listener.
         let _ = Command::new("/usr/bin/pkill")
-            .args(["-x", "JarvisWakeListener"])
+            .args(["-x", "JarvisNextWake"])
             .status()
             .await;
 
@@ -448,7 +428,7 @@ fn start_wake_supervisor(app: AppHandle) {
         while state.wake_enabled.load(Ordering::SeqCst) {
             state.wake_ready.store(false, Ordering::SeqCst);
             let event_file =
-                std::env::temp_dir().join(format!("jarvis-wake-{}.jsonl", std::process::id()));
+                std::env::temp_dir().join(format!("jarvis-next-wake-{}.jsonl", std::process::id()));
             let _ = fs::remove_file(&event_file);
             if let Err(error) = fs::write(&event_file, "") {
                 *state.wake_authorization.write().await = format!("无法创建唤醒事件通道：{error}");
@@ -517,7 +497,7 @@ fn start_wake_supervisor(app: AppHandle) {
                             woke = true;
                             state.wake_enabled.store(false, Ordering::SeqCst);
                             state.wake_ready.store(false, Ordering::SeqCst);
-                            raise_jarvis_window(&app);
+                            // The persistent session owner routes wake to the avatar window.
                         }
                         Some("error") => {
                             *state.wake_authorization.write().await = message
@@ -545,7 +525,7 @@ fn start_wake_supervisor(app: AppHandle) {
 
             if woke || !state.wake_enabled.load(Ordering::SeqCst) {
                 let _ = Command::new("/usr/bin/pkill")
-                    .args(["-x", "JarvisWakeListener"])
+                    .args(["-x", "JarvisNextWake"])
                     .status()
                     .await;
             }
@@ -572,6 +552,17 @@ fn start_wake_supervisor(app: AppHandle) {
 
 #[tauri::command]
 async fn arm_wake_listener(app: AppHandle) -> Result<WakeStatus, String> {
+    if app
+        .state::<next::NextState>()
+        .suspended
+        .load(Ordering::SeqCst)
+    {
+        return Ok(WakeStatus {
+            enabled: false,
+            ready: false,
+            authorization: "系统休眠或锁屏".into(),
+        });
+    }
     start_wake_supervisor(app.clone());
     tokio::time::sleep(Duration::from_millis(80)).await;
     Ok(wake_status_value(&app.state::<AppState>()).await)
@@ -593,7 +584,7 @@ async fn disarm_wake_listener(app: AppHandle) -> Result<WakeStatus, String> {
     // flight. Keep terminating until it has observed wake_enabled=false.
     for _ in 0..15 {
         let _ = Command::new("/usr/bin/pkill")
-            .args(["-x", "JarvisWakeListener"])
+            .args(["-x", "JarvisNextWake"])
             .status()
             .await;
         if !state.wake_supervisor_running.load(Ordering::SeqCst) {
@@ -630,7 +621,7 @@ async fn consume_cold_wake(app: AppHandle, state: State<'_, AppState>) -> Result
     }
     for _ in 0..15 {
         let _ = Command::new("/usr/bin/pkill")
-            .args(["-x", "JarvisWakeListener"])
+            .args(["-x", "JarvisNextWake"])
             .status()
             .await;
         if !state.wake_supervisor_running.load(Ordering::SeqCst) {
@@ -639,7 +630,7 @@ async fn consume_cold_wake(app: AppHandle, state: State<'_, AppState>) -> Result
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     tokio::time::sleep(Duration::from_millis(350)).await;
-    raise_jarvis_window(&app);
+    // The persistent session owner routes wake to the avatar window.
     let _ = app.emit("jarvis-wake", json!({"ok": true, "cold": true}));
     Ok(true)
 }
@@ -707,7 +698,7 @@ async fn ensure_runtime(
     let profile = permission_mode.profile();
     let runtime = CodexRuntime::spawn(app, permission_mode, cwd.clone()).await?;
     runtime.request("initialize", json!({
-        "clientInfo": {"name": "jarvis-codex", "title": "Jarvis Codex", "version": env!("CARGO_PKG_VERSION")},
+        "clientInfo": {"name": "jarvis-next", "title": "Jarvis Next", "version": env!("CARGO_PKG_VERSION")},
         "capabilities": {"experimentalApi": true}
     })).await?;
     runtime.notify("initialized", json!({})).await?;
@@ -716,8 +707,8 @@ async fn ensure_runtime(
         "approvalPolicy": profile.approval_policy,
         "sandbox": profile.sandbox,
         "baseInstructions": format!(
-            "You are Codex speaking through the local Jarvis interface. Keep voice replies concise and natural, execute real tasks with Codex tools when asked, report progress while work continues, and accept spoken corrections in the same thread. {}",
-            profile.instructions
+            "You are Codex speaking through the local Jarvis interface. Keep voice replies concise and natural, execute real tasks with Codex tools when asked, report progress while work continues, and accept spoken corrections in the same thread. {} {}",
+            voice_policy::LISTEN_FIRST, profile.instructions
         )
     });
     let started = if let Some(thread_id) = resume_thread_id.filter(|value| !value.trim().is_empty())
@@ -787,28 +778,7 @@ async fn start_codex_voice(
     runtime.voice_active.store(false, Ordering::SeqCst);
     *runtime.realtime_session_id.write().await = None;
 
-    let mut params = json!({
-        "threadId": thread_id,
-        "outputModality": "audio",
-        "version": "v3",
-        "includeStartupContext": true,
-        "clientManagedHandoffs": false,
-        // STOP must be final. Flushing the tail can create a new Codex turn
-        // after the user has already stopped the session.
-        "flushTranscriptTailOnSessionEnd": false,
-        "codexResponsesAsItems": false,
-        "codexResponseHandoffMode": "commentary",
-        "transport": {"type": "webrtc", "sdp": sdp}
-    });
-    if let Some(voice) = voice {
-        const SUPPORTED: &[&str] = &[
-            "alloy", "arbor", "ash", "ballad", "breeze", "cedar", "coral", "cove", "echo", "ember",
-            "juniper", "maple", "marin", "sage", "shimmer", "sol", "spruce", "vale", "verse",
-        ];
-        if SUPPORTED.contains(&voice.as_str()) {
-            params["voice"] = Value::String(voice);
-        }
-    }
+    let params = voice_policy::start_params(&thread_id, &sdp, voice.as_deref());
     if let Err(error) = runtime.request("thread/realtime/start", params).await {
         *runtime.voice_phase.write().await = "error".to_owned();
         return Err(format!("Codex Voice V3 启动失败：{error}"));
@@ -821,6 +791,11 @@ async fn stop_codex_voice(state: State<'_, AppState>) -> Result<DirectVoiceInfo,
     let Ok(runtime) = runtime(&state).await else {
         return Ok(direct_voice_info(&state).await);
     };
+    if !runtime.voice_active.load(Ordering::SeqCst)
+        && *runtime.voice_phase.read().await != "starting"
+    {
+        return Ok(direct_voice_info(&state).await);
+    }
     let thread_id = runtime.thread().await?;
     *runtime.voice_phase.write().await = "stopping".to_owned();
     let result = runtime
@@ -875,44 +850,67 @@ async fn stop_all(state: State<'_, AppState>) -> Result<(), String> {
         return Ok(());
     };
     let thread_id = runtime.thread().await?;
-    // A realtime handoff and STOP can cross in flight. Re-check briefly so a
-    // turn that starts just after realtime/stop is interrupted as well.
+    // Continue checking because a Voice handoff may arrive immediately after STOP.
     let mut interrupted_turn: Option<String> = None;
+    let mut interrupt_error: Option<String> = None;
     for _ in 0..6 {
-        if let Some(turn_id) = runtime.active_turn.read().await.clone() {
+        let active_turn = { runtime.active_turn.read().await.clone() };
+        if let Some(turn_id) = active_turn {
             if interrupted_turn.as_deref() != Some(turn_id.as_str()) {
-                let _ = runtime
+                match runtime
                     .request(
                         "turn/interrupt",
-                        json!({"threadId": thread_id, "turnId": turn_id}),
+                        json!({"threadId":thread_id,"turnId":turn_id}),
                     )
-                    .await;
-                interrupted_turn = Some(turn_id);
-            }
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-    }
-    if let Ok(background) = runtime
-        .request(
-            "thread/backgroundTerminals/list",
-            json!({"threadId": thread_id, "limit": 100}),
-        )
-        .await
-    {
-        if let Some(terminals) = background.get("data").and_then(Value::as_array) {
-            for terminal in terminals {
-                if let Some(process_id) = terminal.get("processId").and_then(Value::as_str) {
-                    let _ = runtime
-                        .request(
-                            "thread/backgroundTerminals/terminate",
-                            json!({"threadId": thread_id, "processId": process_id}),
-                        )
-                        .await;
+                    .await
+                {
+                    Ok(_) => {
+                        interrupted_turn = Some(turn_id);
+                        interrupt_error = None;
+                    }
+                    Err(error) => interrupt_error = Some(error),
                 }
             }
         }
+        tokio::time::sleep(Duration::from_millis(150)).await;
     }
-    Ok(())
+    let mut failures = Vec::new();
+    if runtime.active_turn.read().await.is_some() {
+        if let Some(error) = interrupt_error {
+            failures.push(format!("任务中断失败：{error}"));
+        }
+    }
+    match runtime
+        .request(
+            "thread/backgroundTerminals/list",
+            json!({"threadId":thread_id,"limit":100}),
+        )
+        .await
+    {
+        Ok(background) => {
+            if let Some(terminals) = background.get("data").and_then(Value::as_array) {
+                for terminal in terminals {
+                    if let Some(process_id) = terminal.get("processId").and_then(Value::as_str) {
+                        if let Err(error) = runtime
+                            .request(
+                                "thread/backgroundTerminals/terminate",
+                                json!({"threadId":thread_id,"processId":process_id}),
+                            )
+                            .await
+                        {
+                            failures.push(format!("后台进程停止失败：{error}"));
+                        }
+                    }
+                }
+            }
+        }
+        Err(error) => failures.push(format!("无法确认后台进程状态：{error}")),
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
 }
 
 #[tauri::command]
@@ -933,9 +931,12 @@ async fn shutdown(state: State<'_, AppState>) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let arguments: Vec<String> = std::env::args().collect();
-    let cold_wake_pending = arguments.iter().any(|argument| argument == "--jarvis-wake");
-    let background_start = arguments.iter().any(|argument| argument == "--background");
+    let launch_mode = launch::LaunchMode::from_args(&arguments);
+    let cold_wake_pending = launch_mode == launch::LaunchMode::Wake;
+    let background_start = !launch_mode.opens_panel();
     tauri::Builder::default()
+        .manage(next::NextState::default())
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
             runtime: Mutex::new(None),
             cold_wake_pending: AtomicBool::new(cold_wake_pending),
@@ -962,7 +963,30 @@ pub fn run() {
             send_text,
             stop_all,
             resolve_server_request,
-            shutdown
+            shutdown,
+            next::load_settings,
+            next::save_settings,
+            next::export_json,
+            next::check_environment,
+            next::list_skins,
+            next::import_skin,
+            next::publish_snapshot,
+            next::read_snapshot,
+            next::dispatch_action,
+            next::avatar_feedback,
+            next::publish_levels,
+            next::window_mode,
+            next::ensure_session_visible,
+            next::record_media_sample,
+            next::publish_session,
+            next::read_session,
+            next::request_session,
+            next::reply_session,
+            next::session_signal,
+            next::monitor_list,
+            next::mouse_control,
+            next::request_camera_permission,
+            next::quit_next
         ])
         .setup(move |app| {
             use tauri_plugin_autostart::MacosLauncher;
@@ -970,6 +994,8 @@ pub fn run() {
                 MacosLauncher::LaunchAgent,
                 Some(vec!["--background"]),
             ))?;
+            // Windows start hidden so a voice/login launch cannot flash settings
+            // before the WebViews finish loading. Only manual launch opens them.
             // Respect the user's login-item preference; never re-enable it on launch.
             if let Some(window) = app.get_webview_window("main") {
                 if background_start {
@@ -978,11 +1004,42 @@ pub fn run() {
                     raise_jarvis_window(app.handle());
                 }
             }
-            if background_start {
-                start_wake_supervisor(app.handle().clone());
-            }
+            next::setup(app)?;
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Jarvis Codex");
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+                let _ = window
+                    .app_handle()
+                    .emit_to("main", "next-action", "panel-hidden");
+            }
+        })
+        .build(tauri::generate_context!())
+        .expect("error building Jarvis Next")
+        .run(|app, event| match event {
+            tauri::RunEvent::ExitRequested { api, .. }
+                if !app
+                    .state::<next::NextState>()
+                    .quitting
+                    .load(Ordering::SeqCst) =>
+            {
+                api.prevent_exit();
+                next::show_panel(app);
+                let _ = app.emit_to("main", "next-action", "quit");
+            }
+            #[cfg(target_os = "macos")]
+            // Ignore initial activation until cold wake is routed. A later
+            // Dock/application click still opens the management panel.
+            tauri::RunEvent::Reopen { .. }
+                if !app
+                    .state::<AppState>()
+                    .cold_wake_pending
+                    .load(Ordering::SeqCst) =>
+            {
+                next::show_panel(app);
+            }
+            _ => {}
+        });
 }

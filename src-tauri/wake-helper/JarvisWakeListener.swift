@@ -157,9 +157,22 @@ final class WakeListener {
 
     private func openHostApp() {
         guard let hostApp else { return }
+        // The running host already consumes the wake event file. Reopening it
+        // would send a macOS Reopen event and raise its management panel.
+        let hostPath = hostApp.standardizedFileURL.resolvingSymlinksInPath().path
+        let hostIsRunning = NSWorkspace.shared.runningApplications.contains { app in
+            !app.isTerminated &&
+                app.bundleURL?.standardizedFileURL.resolvingSymlinksInPath().path == hostPath
+        }
+        if hostIsRunning {
+            emit(["type": "host-routing", "action": "notify-running-host"])
+            return
+        }
+
         let configuration = NSWorkspace.OpenConfiguration()
-        configuration.activates = true
+        configuration.activates = false
         configuration.arguments = ["--jarvis-wake"]
+        emit(["type": "host-routing", "action": "launch-in-background"])
         NSWorkspace.shared.openApplication(
             at: hostApp,
             configuration: configuration

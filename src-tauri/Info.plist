@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>NSCameraUsageDescription</key>
-	<string>Jarvis does not capture video; this declaration allows WebKit to initialize its WebRTC media permission path.</string>
+	<string>Jarvis Next uses the camera only for local hand gesture control when you enable it. Video is not saved or uploaded.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Jarvis locally listens for the wake phrase “Hi Jarvis”; official Codex Voice handles the conversation.</string>
   <key>NSSpeechRecognitionUsageDescription</key>
